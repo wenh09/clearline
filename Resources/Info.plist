@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>org.clearline.client</string>
+<key>CFBundleName</key><string>Clearline</string>
+<key>CFBundleDisplayName</key><string>轻连</string>
+<key>CFBundleExecutable</key><string>Clearline</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.3.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSMinimumSystemVersion</key><string>13.0</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSLocalNetworkUsageDescription</key><string>轻连使用本地代理连接你的自有服务器，并按你的设置访问局域网服务。</string>
+<key>UTImportedTypeDeclarations</key><array><dict><key>UTTypeIdentifier</key><string>org.clearline.client.transfer</string><key>UTTypeConformsTo</key><array><string>public.data</string></array><key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>clearline</string></array></dict></dict></array>
+<key>CFBundleDocumentTypes</key><array><dict><key>CFBundleTypeName</key><string>Clearline Encrypted Transfer</string><key>CFBundleTypeRole</key><string>Viewer</string><key>LSItemContentTypes</key><array><string>org.clearline.client.transfer</string></array></dict></array>
+</dict></plist>

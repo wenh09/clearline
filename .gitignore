@@ -1,0 +1,13 @@
+.DS_Store
+work/
+outputs/
+log/
+worktrees/
+.build/
+*.conf
+*.clearline
+.cache/
+dist/
+.swiftpm/
+__pycache__/
+*.pyc
