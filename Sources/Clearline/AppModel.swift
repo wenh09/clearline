@@ -52,6 +52,14 @@ import Combine
                 finishProgress(); statusNote = message; state = .connected
                 return
             }
+            if mode == .all {
+                let shadowrocket = NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.liguangming.Shadowrocket" }
+                let report = await preflightInspector(profile, nil, shadowrocket)
+                guard session == token, wantsConnection else { return }
+                if report.requiresAcknowledgement {
+                    wantsConnection = false; state = .idle; networkPreflight = report; showNetworkCheck = true; return
+                }
+            }
             begin(profile)
         }
     }
@@ -291,7 +299,8 @@ import Combine
     var busy: Bool { checkingPreflight || [.connecting, .reconnecting, .disconnecting].contains(state) }
     var connected: Bool { state == .connected }
     var backupURL: URL { recoveryFile }
-    var recoveryNeeded: Bool { (FileManager.default.fileExists(atPath: backupURL.path) || FileManager.default.fileExists(atPath: TunnelNetwork.journalPath)) && !connected }
+    private var hasTunnelRecoveryRecord: Bool { [TunnelNetwork.journalPath, TunnelNetwork.legacyJournalPath].contains { FileManager.default.fileExists(atPath: $0) } }
+    var recoveryNeeded: Bool { (FileManager.default.fileExists(atPath: backupURL.path) || hasTunnelRecoveryRecord) && !connected }
 
     init(configurationLoader: @escaping (Bool) throws -> [Profile] = { try KeychainStore.load(interactionAllowed: $0) },
          coreExecutable: URL = CoreRPC.coreURL,
@@ -402,6 +411,7 @@ import Combine
     }
     func continueAfterNetworkCheck() {
         guard !checkingPreflight, !connected, !busy else { return }
+        guard routingMode != .all || networkPreflight?.requiresAcknowledgement != true else { return }
         showNetworkCheck = false; startConnection()
     }
     func cancelNetworkCheck() { showNetworkCheck = false; networkPreflight = nil }
@@ -490,6 +500,7 @@ import Combine
         case "progress":
             if event["stage"] as? String == "server" { advanceProgress(.server) }
             else if event["stage"] as? String == "checking" { advanceProgress(.checking) }
+            else if event["stage"] as? String == "applying" { advanceProgress(.applying) }
         case "speedProgress", "speedResult": receiveSpeedEvent(event)
         case "exitVerification": receiveExitVerification(event)
         case "stats": upload = (event["uploadBytes"] as? NSNumber)?.int64Value ?? 0; download = (event["downloadBytes"] as? NSNumber)?.int64Value ?? 0
@@ -519,7 +530,7 @@ import Combine
         child.onEvent = { [weak self] event in
             guard let self, self.session == token else { return }
             switch event["event"] as? String {
-            case "applied": self.proxyApplied = true; if !self.transportReady && self.coreSupportsRetention { self.proxyRetainedDuringRecovery = true }; self.finishReadyConnection(); self.log("系统代理已接入")
+            case "applied": self.proxyApplied = true; if !self.transportReady && self.coreSupportsRetention { self.proxyRetainedDuringRecovery = true }; self.finishReadyConnection(); self.log(self.packetTunnelActive ? "全局隧道与 DNS 已接入" : "系统代理已接入")
             case "error": self.fail(event["message"] as? String ?? "系统代理设置失败。")
             case "restored": if self.wantsConnection { self.scheduleReconnect() }
             default: break
@@ -529,7 +540,7 @@ import Combine
             guard let self, self.session == token, self.wantsConnection, self.state == .connected else { return }
             self.statusNote = "网络接入已停止，正在恢复"; self.scheduleReconnect()
         }
-        do { try child.start(); try child.send(["action": "enable", "httpPort": http, "socksPort": socks, "corePID": Int(pid)]) }
+        do { try child.start(); try child.send(["action": routingMode == .all ? "monitor" : "enable", "httpPort": http, "socksPort": socks, "corePID": Int(pid)]) }
         catch { fail("无法配置系统代理：" + error.localizedDescription) }
     }
     private func clean() async -> Bool {
@@ -574,7 +585,11 @@ import Combine
         }
         core = nil; httpPort = nil; connectedAt = nil
         packetTunnelActive = false
-        guard !FileManager.default.fileExists(atPath: TunnelNetwork.journalPath) else { message = "系统隧道恢复未完成，请从工具菜单恢复网络。"; return false }
+        if hasTunnelRecoveryRecord {
+            do { _ = try await CoreRPC.call("recoverTunnel", [:]) }
+            catch { message = "系统隧道恢复未完成，请从工具菜单恢复网络。"; return false }
+        }
+        guard !hasTunnelRecoveryRecord else { message = "系统隧道恢复未完成，请从工具菜单恢复网络。"; return false }
         proxyApplied = false; transportReady = false; coreSupportsRetention = false; proxyRetainedDuringRecovery = false
         return true
     }
@@ -628,7 +643,7 @@ import Combine
     }
     func recover() {
         guard !connected, !busy else { return }
-        if FileManager.default.fileExists(atPath: TunnelNetwork.journalPath) {
+        if hasTunnelRecoveryRecord {
             do { guard try preparePacketTunnel() else { needsTunnelApproval = true; return } }
             catch { needsTunnelApproval = true; return }
             state = .disconnecting

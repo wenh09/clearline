@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -42,6 +43,7 @@ type packetStack struct {
 	connections sync.Map
 	slots       chan struct{}
 	once        sync.Once
+	up, down    atomic.Int64
 }
 
 func newPacketStack(parent context.Context, device packetDevice, tunnel Tunnel) (*packetStack, error) {
@@ -78,6 +80,7 @@ func newPacketStack(parent context.Context, device packetDevice, tunnel Tunnel) 
 	})
 	p.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder.HandlePacket)
 	udpForwarder := udp.NewForwarder(p.stack, func(r *udp.ForwarderRequest) {
+		id := r.ID()
 		var q waiter.Queue
 		ep, e := r.CreateEndpoint(&q)
 		if e != nil {
@@ -89,9 +92,15 @@ func newPacketStack(parent context.Context, device packetDevice, tunnel Tunnel) 
 			ep.Close()
 			return
 		}
-		go func() { defer func() { <-p.slots }(); p.forward(gonet.NewUDPConn(p.stack, &q, ep), r.ID(), "udp") }()
+		go func() { defer func() { <-p.slots }(); p.forward(gonet.NewUDPConn(p.stack, &q, ep), id, "udp") }()
 	})
-	p.stack.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)
+	p.stack.SetTransportProtocolHandler(udp.ProtocolNumber, func(id stack.TransportEndpointID, packet stack.PacketBufferPtr) bool {
+		// The pinned gVisor UDP forwarder takes a reference but exposes no
+		// request Release method. Endpoint creation above is synchronous and
+		// the endpoint takes its own reference, so release the request's here.
+		defer packet.DecRef()
+		return udpForwarder.HandlePacket(id, packet)
+	})
 	go func() {
 		b := make([]byte, 65536)
 		for {
@@ -103,6 +112,7 @@ func newPacketStack(parent context.Context, device packetDevice, tunnel Tunnel) 
 			if n < 1 {
 				continue
 			}
+			p.up.Add(int64(n))
 			var proto tcpip.NetworkProtocolNumber
 			switch b[0] >> 4 {
 			case 4:
@@ -124,7 +134,8 @@ func newPacketStack(parent context.Context, device packetDevice, tunnel Tunnel) 
 				return
 			}
 			view := packet.ToView()
-			_, err := device.Write(view.AsSlice())
+			n, err := device.Write(view.AsSlice())
+			p.down.Add(int64(n))
 			view.Release()
 			packet.DecRef()
 			if err != nil {
@@ -265,6 +276,27 @@ func (p *packetStack) serveDNS(c net.Conn, network string) {
 				return
 			}
 			builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: header.ID, Response: true, RecursionDesired: header.RecursionDesired, RCode: dnsmessage.RCodeServerFailure})
+			builder.StartQuestions()
+			for _, question := range questions {
+				builder.Question(question)
+			}
+			reply, err = builder.Finish()
+			if err != nil {
+				return
+			}
+		}
+		if network == "udp" && len(reply) > 512 {
+			var parser dnsmessage.Parser
+			header, err := parser.Start(reply)
+			if err != nil {
+				return
+			}
+			questions, err := parser.AllQuestions()
+			if err != nil {
+				return
+			}
+			header.Truncated = true
+			builder := dnsmessage.NewBuilder(nil, header)
 			builder.StartQuestions()
 			for _, question := range questions {
 				builder.Question(question)

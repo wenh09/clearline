@@ -26,6 +26,10 @@ while let line = readLine() {
     queue.sync {
         do {
             switch message["action"] as? String {
+            case "monitor":
+                guard let pid = message["corePID"] as? Int, pid > 0 else { return }
+                // Global TUN mode does not install an ephemeral system proxy.
+                corePID = Int32(pid); active = true; emit(["event": "applied"])
             case "enable":
                 guard let http = message["httpPort"] as? Int, let socks = message["socksPort"] as? Int, let pid = message["corePID"] as? Int, pid > 0 else { return }
                 corePID = Int32(pid)

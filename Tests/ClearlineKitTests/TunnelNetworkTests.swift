@@ -54,6 +54,16 @@ final class TunnelNetworkTests: XCTestCase {
         XCTAssertEqual(fake.routes["198.51.100.1"]?.0, "en1")
         XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
     }
+    func testRebootRestoresDNSWhenKernelRoutesAreAlreadyGone() throws {
+        let path = journal(); defer { try? FileManager.default.removeItem(at: path) }
+        let fake = FakeNetwork(); let original = fake.dns
+        try TunnelNetwork(journalURL: path, command: fake.command).install(interface: "utun42", endpoint: "198.51.100.1", uid: 501)
+        fake.routes.removeAll() // Kernel state vanished, DNS preferences survived.
+        try TunnelNetwork(journalURL: path, command: fake.command).restore()
+        XCTAssertEqual(fake.dns, original)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+        XCTAssertFalse(TunnelNetwork.journalPath.hasPrefix("/var/run/"))
+    }
     func testUserDNSAndOtherVPNRouteArePreservedOnRestore() throws {
         let path = journal(); defer { try? FileManager.default.removeItem(at: path) }
         let fake = FakeNetwork(); let manager = TunnelNetwork(journalURL: path, command: fake.command)

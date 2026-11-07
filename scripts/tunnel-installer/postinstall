@@ -1,5 +1,7 @@
 #!/bin/sh
 set -eu
 /bin/launchctl enable system/org.clearline.tunnel
-/bin/launchctl bootstrap system /Library/LaunchDaemons/org.clearline.tunnel.plist
+if ! /bin/launchctl print system/org.clearline.tunnel >/dev/null 2>&1; then
+    /bin/launchctl bootstrap system /Library/LaunchDaemons/org.clearline.tunnel.plist || /bin/launchctl print system/org.clearline.tunnel >/dev/null
+fi
 exit 0

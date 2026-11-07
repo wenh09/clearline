@@ -8,7 +8,7 @@ import Security
         guard FileManager.default.fileExists(atPath: "/var/run/org.clearline.tunnel.sock"),
               let data = try? Data(contentsOf: URL(fileURLWithPath: receipt)),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-              let hashes = plist["ClearlineCoreHashes"] as? [String] else { return false }
+              let hashes = plist["ClearlineCoreHashes"] as? [String], plist["ClearlineTunnelProtocol"] as? Int == 2 else { return false }
         var core: SecStaticCode?; var info: CFDictionary?
         guard SecStaticCodeCreateWithPath(CoreRPC.coreURL as CFURL, [], &core) == errSecSuccess, let core,
               SecStaticCodeCheckValidity(core, [], nil) == errSecSuccess,

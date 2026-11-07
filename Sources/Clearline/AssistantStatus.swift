@@ -37,7 +37,7 @@ import Foundation
     struct Document: Encodable {
         let schemaVersion = 2
         let version = "0.3.0"
-        let build = "3"
+        let build = "4"
         let updatedAt: String
         let connectionSaved: Bool?
         let connected: Bool

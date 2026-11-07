@@ -56,6 +56,8 @@ type packetSession struct {
 	restored chan struct{}
 }
 
+func (s *packetSession) bytes() (int64, int64) { return s.stack.up.Load(), s.stack.down.Load() }
+
 func rootAgentConnection(ctx context.Context) (*net.UnixConn, error) {
 	c, e := (&net.Dialer{}).DialContext(ctx, "unix", tunnelAgentSocket)
 	if e != nil {

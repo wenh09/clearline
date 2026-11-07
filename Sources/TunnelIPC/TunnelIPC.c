@@ -11,29 +11,21 @@
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <launch.h>
+#include <poll.h>
 #include <mach-o/getsect.h>
 extern const struct mach_header_64 _mh_execute_header;
 
 int cl_listen(void) {
-    const char *path = "/var/run/org.clearline.tunnel.sock";
-    struct stat st;
-    if (lstat(path, &st) == 0) {
-        if (!S_ISSOCK(st.st_mode) || st.st_uid != 0) return -1;
-        if (unlink(path) != 0) return -1;
-    } else if (errno != ENOENT) return -1;
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
+    int *fds = NULL; size_t count = 0;
+    if (launch_activate_socket("TunnelSocket", &fds, &count) != 0) return -1;
+    if (count != 1) { for (size_t i=0;i<count;i++) close(fds[i]);free(fds);return -1; }
+    int fd = fds[0]; free(fds);
     fcntl(fd, F_SETFD, FD_CLOEXEC);
-    struct sockaddr_un address = {0};
-    address.sun_family = AF_UNIX; address.sun_len = sizeof(address);
-    strlcpy(address.sun_path, path, sizeof(address.sun_path));
-    mode_t old = umask(077);
-    int result = bind(fd, (struct sockaddr *)&address, sizeof(address));
-    umask(old);
-    if (result != 0 || chmod(path, 0666) != 0 || listen(fd, 4) != 0) { close(fd); return -1; }
     return fd;
 }
-int cl_accept(int listener) { int fd = accept(listener, NULL, NULL); if (fd >= 0) { fcntl(fd,F_SETFD,FD_CLOEXEC); int yes=1;setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes)); } return fd; }
+int cl_accept(int listener) { struct pollfd poller={.fd=listener,.events=POLLIN};int ready=poll(&poller,1,30000);if(ready==0){errno=0;return -2;}if(ready<0)return -1;int fd = accept(listener, NULL, NULL); if (fd >= 0) { fcntl(fd,F_SETFD,FD_CLOEXEC); int yes=1;setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes)); } return fd; }
 int cl_peer(int fd, uid_t *uid, pid_t *pid) {
     gid_t gid;
     socklen_t size = sizeof(*pid);

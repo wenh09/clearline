@@ -9,7 +9,8 @@ public struct TunnelNetworkFailure: LocalizedError {
 /// Only the privileged daemon calls this with the real command runner. Tests
 /// inject a runner and a temporary journal, without changing system settings.
 public final class TunnelNetwork {
-    public static let journalPath = "/var/run/org.clearline.tunnel.state"
+    public static let journalPath = "/Library/Application Support/Clearline/system-tunnel-state.plist"
+    public static let legacyJournalPath = "/var/run/org.clearline.tunnel.state"
     public static let dnsAddress = "198.18.0.2"
     private struct DNSSnapshot: Codable { let service: String; let before: [String] }
     private struct Journal: Codable {
@@ -40,10 +41,20 @@ public final class TunnelNetwork {
         return result
     }
     private func store(_ journal: Journal) throws {
+        try prepareDirectory()
         let encoder = PropertyListEncoder(); encoder.outputFormat = .binary
         try encoder.encode(journal).write(to: journalURL, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: journalURL.path)
         active = journal
+    }
+    private func prepareDirectory() throws {
+        let directory = journalURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o711])
+        if journalURL.path == Self.journalPath {
+            let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+            guard attributes[.type] as? FileAttributeType == .typeDirectory, (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == 0 else { throw TunnelNetworkFailure("网络恢复目录权限无效") }
+            try FileManager.default.setAttributes([.posixPermissions: 0o711], ofItemAtPath: directory.path)
+        }
     }
     private func fields(_ text: String) -> [String: String] {
         var result: [String: String] = [:]
@@ -120,7 +131,20 @@ public final class TunnelNetwork {
     }
     public func restore(owner: UInt32? = nil) throws {
         lock.lock(); defer { lock.unlock() }
+        if journalURL.path == Self.journalPath, !FileManager.default.fileExists(atPath: journalURL.path), FileManager.default.fileExists(atPath: Self.legacyJournalPath) {
+            try prepareDirectory()
+            let attributes = try FileManager.default.attributesOfItem(atPath: Self.legacyJournalPath)
+            guard attributes[.type] as? FileAttributeType == .typeRegular, (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == 0 else { throw TunnelNetworkFailure("旧网络恢复记录权限无效") }
+            try FileManager.default.moveItem(at: URL(fileURLWithPath: Self.legacyJournalPath), to: journalURL)
+        }
         guard FileManager.default.fileExists(atPath: journalURL.path) else { active = nil; return }
+        if journalURL.path == Self.journalPath {
+            try prepareDirectory()
+            let attributes = try FileManager.default.attributesOfItem(atPath: journalURL.path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular,
+                  (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == 0,
+                  ((attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o777) & 0o077 == 0 else { throw TunnelNetworkFailure("网络恢复记录权限无效") }
+        }
         let journal = try PropertyListDecoder().decode(Journal.self, from: Data(contentsOf: journalURL))
         if let owner, owner != journal.uid { throw TunnelNetworkFailure("另一位用户的隧道正在恢复") }
         let existing = try services()

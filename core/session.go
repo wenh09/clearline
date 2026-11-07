@@ -187,7 +187,13 @@ func runSession(parent context.Context, r Request, input *bufio.Reader, output f
 				return err
 			}
 		case <-stats.C:
-			output(map[string]any{"event": "stats", "uploadBytes": p.up.Load(), "downloadBytes": p.down.Load()})
+			up, down := p.up.Load(), p.down.Load()
+			if packets != nil {
+				a, b := packets.bytes()
+				up += a
+				down += b
+			}
+			output(map[string]any{"event": "stats", "uploadBytes": up, "downloadBytes": down})
 		case item := <-events:
 			if item.worker != worker {
 				continue
@@ -251,6 +257,7 @@ func runSession(parent context.Context, r Request, input *bufio.Reader, output f
 				}
 				retained.set(tunnel)
 				if r.PacketTunnel && packets == nil {
+					output(map[string]any{"event": "progress", "stage": "applying"})
 					packets, e = startPacketSession(ctx, retained, endpoint)
 					if e != nil {
 						return connectionError{message: e.Error()}

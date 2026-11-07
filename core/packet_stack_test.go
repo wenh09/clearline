@@ -21,12 +21,14 @@ type packetTestTunnel struct {
 	mu    sync.Mutex
 	calls []string
 	fail  bool
+	large bool
 }
 
 func (t *packetTestTunnel) Close() {}
 func (t *packetTestTunnel) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	t.mu.Lock()
 	t.calls = append(t.calls, network+" "+address)
+	large := t.large
 	t.mu.Unlock()
 	if t.fail {
 		return nil, errors.New("offline")
@@ -52,10 +54,16 @@ func (t *packetTestTunnel) DialContext(ctx context.Context, network, address str
 			builder.StartQuestions()
 			builder.Question(q)
 			builder.StartAnswers()
-			if q.Type == dnsmessage.TypeA {
-				builder.AResource(dnsmessage.ResourceHeader{Name: q.Name, Class: dnsmessage.ClassINET, TTL: 30}, dnsmessage.AResource{A: [4]byte{198, 51, 100, 23}})
-			} else if q.Type == dnsmessage.TypeAAAA {
-				builder.AAAAResource(dnsmessage.ResourceHeader{Name: q.Name, Class: dnsmessage.ClassINET, TTL: 30}, dnsmessage.AAAAResource{AAAA: netip.MustParseAddr("2001:db8::23").As16()})
+			count := 1
+			if large {
+				count = 100
+			}
+			for i := 0; i < count; i++ {
+				if q.Type == dnsmessage.TypeA {
+					builder.AResource(dnsmessage.ResourceHeader{Name: q.Name, Class: dnsmessage.ClassINET, TTL: 30}, dnsmessage.AResource{A: [4]byte{198, 51, 100, 23}})
+				} else if q.Type == dnsmessage.TypeAAAA {
+					builder.AAAAResource(dnsmessage.ResourceHeader{Name: q.Name, Class: dnsmessage.ClassINET, TTL: 30}, dnsmessage.AAAAResource{AAAA: netip.MustParseAddr("2001:db8::23").As16()})
+				}
 			}
 			reply, _ := builder.Finish()
 			writeDatagram(b, reply)
@@ -169,6 +177,13 @@ func TestPacketStackForwardsIPv4IPv6TCPUDPAndSystemDNS(t *testing.T) {
 	}
 	if len(ips) != 2 {
 		t.Fatalf("DNS responses: %v", ips)
+	}
+	upstream.mu.Lock()
+	upstream.large = true
+	upstream.mu.Unlock()
+	ips, e = client.LookupContextHost(ctx, "dns-big.example")
+	if e != nil || len(ips) < 100 {
+		t.Fatalf("large UDP DNS did not retry over TCP: count=%d error=%v", len(ips), e)
 	}
 	upstream.mu.Lock()
 	defer upstream.mu.Unlock()

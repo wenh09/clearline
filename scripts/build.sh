@@ -29,7 +29,7 @@ for arch in arm64 amd64; do
 done
 lipo -create "$cache/core-arm64" "$cache/core-amd64" -output "$cache/core-universal"
 codesign --force --identifier org.clearline.core --sign - "$cache/core-universal"
-tunnel_info="$cache/tunnel-agent-info-$(shasum -a 256 "$cache/core-universal" | awk '{print $1}').plist"
+tunnel_info="$cache/tunnel-agent-info-v2-$(shasum -a 256 "$cache/core-universal" | awk '{print $1}').plist"
 # The privileged daemon pins the exact signed core hashes in a read-only Mach-O
 # section. It never trusts a client PID, path, team name or user-writable file alone.
 python3 - "$cache/core-universal" "$tunnel_info" <<'PYINFO'
@@ -39,7 +39,7 @@ for arch in ('arm64', 'x86_64'):
     info = subprocess.check_output(['codesign', '-d', '--arch', arch, '--verbose=4', sys.argv[1]], stderr=subprocess.STDOUT, text=True)
     hashes.append(re.search(r'^CDHash=([0-9a-f]{40})$', info, re.M).group(1))
 with open(sys.argv[2], 'wb') as out:
-    plistlib.dump({'CFBundleIdentifier': 'org.clearline.tunnel', 'ClearlineCoreHashes': hashes}, out)
+    plistlib.dump({'CFBundleIdentifier': 'org.clearline.tunnel', 'ClearlineCoreHashes': hashes, 'ClearlineTunnelProtocol': 2}, out)
 PYINFO
 for arch in arm64 x86_64; do
   swift build -c release --triple "$arch-apple-macosx13.0" --scratch-path "$cache/swift-$arch" -Xswiftc -file-prefix-map -Xswiftc "$repo=/src/clearline" -Xswiftc -file-prefix-map -Xswiftc "$HOME=/home/build" -Xswiftc -debug-prefix-map -Xswiftc "$repo=/src/clearline" > "$cache/build-$arch.log" 2>&1 || { tail -60 "$cache/build-$arch.log" >&2; exit 1; }
@@ -75,15 +75,38 @@ codesign --force --identifier org.clearline.tunnel --sign - "$app/Contents/Helpe
 codesign --force --sign - "$app/Contents/Helpers/ClearlineNetworkAgent"
 payload="$(mktemp -d "$cache/tunnel-package-payload.XXXXXX")"
 mkdir -p "$payload/Library/PrivilegedHelperTools" "$payload/Library/LaunchDaemons"
+mkdir -p "$payload/Library/Application Support/Clearline"
+chmod 711 "$payload/Library/Application Support/Clearline"
 cp "$app/Contents/Helpers/ClearlineTunnelAgent" "$payload/Library/PrivilegedHelperTools/org.clearline.tunnel"
 cp "$tunnel_info" "$payload/Library/PrivilegedHelperTools/org.clearline.tunnel.version.plist"
 cp Resources/org.clearline.tunnel.plist "$payload/Library/LaunchDaemons/"
 chmod 755 "$payload/Library/PrivilegedHelperTools/org.clearline.tunnel"
 chmod 644 "$payload/Library/PrivilegedHelperTools/org.clearline.tunnel.version.plist" "$payload/Library/LaunchDaemons/org.clearline.tunnel.plist"
-pkgbuild --root "$payload" --ownership recommended --scripts scripts/tunnel-installer --identifier org.clearline.tunnel.pkg --version 0.3.0.3 "$app/Contents/Resources/ClearlineSystemTunnel.pkg" >/dev/null
+pkgbuild --root "$payload" --ownership recommended --scripts scripts/tunnel-installer --identifier org.clearline.tunnel.pkg --version 0.3.0.4 "$app/Contents/Resources/ClearlineSystemTunnel.pkg" >/dev/null
 rm -rf "$payload"
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
+installer_parts="$(mktemp -d "$cache/installer-parts.XXXXXX")"
+app_payload="$(mktemp -d "$cache/application-payload.XXXXXX")"
+mkdir -p "$app_payload/Applications" "$installer_parts/scripts"
+ditto "$app" "$app_payload/Applications/Clearline.app"
+cp scripts/app-installer/preinstall "$installer_parts/scripts/preinstall"
+cp scripts/tunnel-installer/preinstall "$installer_parts/scripts/network-preinstall"
+cp scripts/tunnel-installer/postinstall "$installer_parts/scripts/postinstall"
+chmod 755 "$installer_parts/scripts/preinstall" "$installer_parts/scripts/network-preinstall" "$installer_parts/scripts/postinstall"
+pkgbuild --analyze --root "$app_payload" "$installer_parts/components.plist"
+python3 - "$installer_parts/components.plist" <<'PYCOMP'
+import plistlib, sys
+with open(sys.argv[1], 'rb') as f: components = plistlib.load(f)
+for component in components:
+    component['BundleIsRelocatable'] = False
+with open(sys.argv[1], 'wb') as f: plistlib.dump(components, f)
+PYCOMP
+pkgbuild --root "$app_payload" --component-plist "$installer_parts/components.plist" --ownership recommended --scripts "$installer_parts/scripts" --identifier org.clearline.client.pkg --version 0.3.0.4 "$installer_parts/ClearlineApplication.pkg" >/dev/null
+cp "$app/Contents/Resources/ClearlineSystemTunnel.pkg" "$installer_parts/"
+productbuild --synthesize --product Resources/InstallerRequirements.plist --package "$installer_parts/ClearlineApplication.pkg" --package "$installer_parts/ClearlineSystemTunnel.pkg" "$installer_parts/distribution.xml" >/dev/null
+productbuild --distribution "$installer_parts/distribution.xml" --package-path "$installer_parts" "$out/Clearline-macOS-installer.pkg" >/dev/null
+rm -rf "$app_payload" "$installer_parts"
 python3 - "$app" "$out/Clearline-macOS-universal.zip" <<'PYZIP'
 import sys, zipfile
 from pathlib import Path
