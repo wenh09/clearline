@@ -79,10 +79,13 @@ func cloudTestService(t *testing.T, handler http.HandlerFunc) *cloudService {
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	c := newCloudService()
+	// Legacy deployment fixtures represent an explicitly chosen create flow.
+	c.intent = "create"
 	c.api = server.URL + "/v2"
 	c.oauth = server.URL + "/oauth"
 	c.client = server.Client()
 	c.state = CloudState{ClientID: "test-client", AccessToken: "test-access", RefreshToken: "test-refresh", Expires: time.Now().Add(time.Hour).Unix(), AccountID: "test-account"}
+	c.state.Scopes = cloudScopes
 	c.save = func(context.Context, CloudState) error { return nil }
 	c.event = func(any) {}
 	c.verify = func(context.Context, Profile) error { return nil }
@@ -160,6 +163,123 @@ func TestCloudAuthorizationEndToEnd(t *testing.T) {
 		t.Fatal("native onboarding incomplete")
 	}
 }
+
+func TestCloudAuthorizationRefreshesRegisteredCallback(t *testing.T) {
+	var mu sync.Mutex
+	registeredRedirect := "http://127.0.0.1:1/callback"
+	var challenge string
+	var updated bool
+	c := cloudTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/register/test-client":
+			var body struct {
+				ClientID  string   `json:"client_id"`
+				Redirects []string `json:"redirect_uris"`
+			}
+			if r.Method != http.MethodPut || r.Header.Get("Authorization") != "Bearer test-registration" || json.NewDecoder(r.Body).Decode(&body) != nil || body.ClientID != "test-client" || len(body.Redirects) != 1 {
+				http.Error(w, "invalid registration update", 400)
+				return
+			}
+			mu.Lock()
+			registeredRedirect, updated = body.Redirects[0], true
+			mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]any{"client_id": "test-client", "redirect_uris": body.Redirects})
+		case "/oauth/token":
+			r.ParseForm()
+			mu.Lock()
+			valid := r.Form.Get("redirect_uri") == registeredRedirect && cloudPKCE(r.Form.Get("code_verifier")) == challenge && r.Form.Get("code") == "owner-code"
+			mu.Unlock()
+			if !valid {
+				http.Error(w, "invalid callback or PKCE", 400)
+				return
+			}
+			fmt.Fprint(w, `{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`)
+		case "/v2/account":
+			fmt.Fprint(w, `{"account":{"uuid":"test-account","status":"active"}}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", 404)
+		}
+	})
+	c.state.RegistrationToken = "test-registration"
+	deployment := &CloudDeployment{Name: "existing-deployment", DropletID: 42}
+	c.state.Deployment = deployment
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	callbackDone := make(chan error, 1)
+	c.event = func(raw any) {
+		e := raw.(map[string]any)
+		if e["event"] != "cloudAuthorize" {
+			return
+		}
+		u, _ := url.Parse(e["url"].(string))
+		q := u.Query()
+		mu.Lock()
+		redirect := registeredRedirect
+		ready := updated && redirect == q.Get("redirect_uri")
+		challenge = q.Get("code_challenge")
+		mu.Unlock()
+		if !ready {
+			t.Error("authorization opened before registered callback matched the active listener")
+			cancel()
+			return
+		}
+		if c.state.AccessToken != "test-access" || c.state.RefreshToken != "test-refresh" || c.state.Deployment != deployment {
+			t.Error("existing authorization or deployment changed before owner consent")
+		}
+		go func() {
+			response, err := http.Get(redirect + "?" + url.Values{"code": {"owner-code"}, "state": {q.Get("state")}}.Encode())
+			if err == nil {
+				response.Body.Close()
+			}
+			callbackDone <- err
+		}()
+	}
+	if err := c.login(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-callbackDone; err != nil {
+		t.Fatal(err)
+	}
+	if c.state.ClientID != "test-client" || c.state.RegistrationToken != "test-registration" || c.state.Deployment != deployment || c.state.AccessToken != "new-access" {
+		t.Fatal("reauthorization did not preserve the existing client and deployment")
+	}
+}
+
+func TestCloudAuthorizationStopsWhenCallbackUpdateFails(t *testing.T) {
+	for _, response := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"provider failure", 503, `{}`},
+		{"stale callback", 200, `{"client_id":"test-client","redirect_uris":["http://127.0.0.1:1/callback"]}`},
+		{"wrong client", 200, `{"client_id":"other-client","redirect_uris":[]}`},
+	} {
+		t.Run(response.name, func(t *testing.T) {
+			c := cloudTestService(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPut || r.URL.Path != "/oauth/register/test-client" {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+				w.WriteHeader(response.status)
+				fmt.Fprint(w, response.body)
+			})
+			c.state.RegistrationToken = "test-registration"
+			opened := false
+			c.event = func(raw any) {
+				if raw.(map[string]any)["event"] == "cloudAuthorize" {
+					opened = true
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if c.login(ctx) == nil || opened || c.state.AccessToken != "test-access" || c.state.RefreshToken != "test-refresh" {
+				t.Fatal("failed callback update opened authorization or changed existing credentials")
+			}
+		})
+	}
+}
+
 func TestCloudPlanReadsOnlyAndPrefersUS(t *testing.T) {
 	var mutated bool
 	c := cloudTestService(t, func(w http.ResponseWriter, r *http.Request) {

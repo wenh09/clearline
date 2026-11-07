@@ -32,6 +32,7 @@ import (
 const cloudOAuth = "https://cloud.digitalocean.com/v1/oauth"
 const cloudAPI = "https://api.digitalocean.com/v2"
 const cloudScopes = "account:read droplet:read droplet:create regions:read sizes:read actions:read image:read snapshot:read vpc:read"
+const cloudReadScopes = "account:read droplet:read"
 
 type CloudPlan struct {
 	ID       string  `json:"id"`
@@ -49,6 +50,7 @@ type CloudState struct {
 	RefreshToken      string           `json:"refreshToken,omitempty"`
 	Expires           int64            `json:"expires,omitempty"`
 	AccountID         string           `json:"accountID,omitempty"`
+	Scopes            string           `json:"scopes,omitempty"`
 	Plan              *CloudPlan       `json:"plan,omitempty"`
 	Deployment        *CloudDeployment `json:"deployment,omitempty"`
 }
@@ -62,17 +64,24 @@ type CloudDeployment struct {
 	Profile     *Profile `json:"profile,omitempty"`
 }
 type cloudCommand struct {
-	Action string      `json:"action"`
-	ID     string      `json:"id"`
-	State  *CloudState `json:"state,omitempty"`
+	Action   string      `json:"action"`
+	ID       string      `json:"id"`
+	State    *CloudState `json:"state,omitempty"`
+	Intent   string      `json:"intent,omitempty"`
+	ServerID int64       `json:"serverID,omitempty"`
+	Code     string      `json:"code,omitempty"`
 }
 type cloudService struct {
-	state      CloudState
-	client     *http.Client
-	oauth, api string
-	save       func(context.Context, CloudState) error
-	event      func(any)
-	verify     func(context.Context, Profile) error
+	state           CloudState
+	client          *http.Client
+	oauth, api      string
+	save            func(context.Context, CloudState) error
+	event           func(any)
+	verify          func(context.Context, Profile) error
+	intent          string
+	requestedScopes string
+	pairing         *existingPairing
+	sshRead         func(context.Context, string, string) (string, error)
 }
 
 type cloudHTTPError struct{ status int }
@@ -89,7 +98,7 @@ func cloudRandom(n int) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 func newCloudService() *cloudService {
-	return &cloudService{client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, oauth: cloudOAuth, api: cloudAPI, event: emit, verify: verifyCloudProfile}
+	return &cloudService{client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, oauth: cloudOAuth, api: cloudAPI, event: emit, verify: verifyCloudProfile, intent: "existing", sshRead: readExistingSSH}
 }
 
 // HTTP response bodies and URLs are never included in errors: OAuth errors can
@@ -178,6 +187,7 @@ func cloudCallback(ctx context.Context, listener net.Listener, state string) (<-
 }
 
 func (c *cloudService) login(ctx context.Context) error {
+	c.pairing = nil
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -188,12 +198,12 @@ func (c *cloudService) login(ctx context.Context) error {
 	state, verifier := cloudRandom(32), cloudRandom(32)
 	codes, stop := cloudCallback(ctx, listener, state)
 	defer stop()
+	body := map[string]any{"client_name": "Clearline for macOS", "redirect_uris": []string{redirect}, "token_endpoint_auth_method": "none", "grant_types": []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"}}
 	if c.state.ClientID == "" {
 		var registered struct {
 			ClientID     string `json:"client_id"`
 			Registration string `json:"registration_access_token"`
 		}
-		body := map[string]any{"client_name": "Clearline for macOS", "redirect_uris": []string{redirect}, "token_endpoint_auth_method": "none", "grant_types": []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"}}
 		if err = c.request(ctx, "POST", c.oauth+"/register", body, "", &registered); err != nil {
 			return err
 		}
@@ -205,9 +215,33 @@ func (c *cloudService) login(ctx context.Context) error {
 		if err = c.persist(ctx); err != nil {
 			return err
 		}
+	} else {
+		// The provider's consent form can retain the registered callback port
+		// even when /authorize requests a different loopback port. Synchronize
+		// the registration before opening consent, keeping the existing client,
+		// tokens and deployment intact if the update fails.
+		if c.state.RegistrationToken == "" {
+			return errors.New("本机 OAuth 注册信息不完整，无法更新登录回调")
+		}
+		body["client_id"] = c.state.ClientID
+		var updated struct {
+			ClientID  string   `json:"client_id"`
+			Redirects []string `json:"redirect_uris"`
+		}
+		if err = c.request(ctx, "PUT", c.oauth+"/register/"+url.PathEscape(c.state.ClientID), body, c.state.RegistrationToken, &updated); err != nil {
+			return err
+		}
+		if updated.ClientID != c.state.ClientID || len(updated.Redirects) != 1 || updated.Redirects[0] != redirect {
+			return errors.New("DigitalOcean 登录回调未更新，请重试")
+		}
 	}
-	q := url.Values{"client_id": {c.state.ClientID}, "redirect_uri": {redirect}, "response_type": {"code"}, "scope": {cloudScopes}, "state": {state}, "code_challenge": {cloudPKCE(verifier)}, "code_challenge_method": {"S256"}, "prompt": {"select_account"}}
-	c.event(map[string]any{"event": "cloudAuthorize", "url": c.oauth + "/authorize?" + q.Encode()})
+	c.requestedScopes = cloudReadScopes
+	if c.intent == "create" {
+		c.requestedScopes = cloudScopes
+	}
+	q := url.Values{"client_id": {c.state.ClientID}, "redirect_uri": {redirect}, "response_type": {"code"}, "scope": {c.requestedScopes}, "state": {state}, "code_challenge": {cloudPKCE(verifier)}, "code_challenge_method": {"S256"}, "prompt": {"select_account"}}
+	deadline, _ := ctx.Deadline()
+	c.event(map[string]any{"event": "cloudAuthorize", "url": c.oauth + "/authorize?" + q.Encode(), "expires": deadline.Unix()})
 	var code string
 	select {
 	case code = <-codes:
@@ -240,14 +274,18 @@ func (c *cloudService) login(ctx context.Context) error {
 	if err = c.persist(ctx); err != nil {
 		return err
 	}
-	c.event(map[string]any{"event": "cloudAuthorized"})
-	return c.plan(ctx)
+	c.event(map[string]any{"event": "cloudAuthorized", "canCreate": c.canCreate()})
+	if c.intent == "create" {
+		return c.plan(ctx)
+	}
+	return c.listExisting(ctx)
 }
 func (c *cloudService) token(ctx context.Context, form url.Values) error {
 	var token struct {
 		Access  string `json:"access_token"`
 		Refresh string `json:"refresh_token"`
 		Expires int64  `json:"expires_in"`
+		Scopes  string `json:"scope"`
 	}
 	if err := c.request(ctx, "POST", c.oauth+"/token", form, "", &token); err != nil {
 		return err
@@ -258,6 +296,11 @@ func (c *cloudService) token(ctx context.Context, form url.Values) error {
 	c.state.AccessToken = token.Access
 	c.state.RefreshToken = token.Refresh
 	c.state.Expires = time.Now().Unix() + token.Expires
+	if token.Scopes != "" {
+		c.state.Scopes = token.Scopes
+	} else if form.Get("grant_type") == "authorization_code" {
+		c.state.Scopes = c.requestedScopes
+	}
 	return c.persist(ctx)
 }
 func (c *cloudService) apiCall(ctx context.Context, method, path string, body, result any) error {
@@ -285,9 +328,16 @@ type cloudSize struct {
 	Memory    int      `json:"memory"`
 }
 type cloudDroplet struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	Status   string `json:"status"`
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Memory int    `json:"memory"`
+	Disk   int    `json:"disk"`
+	Region struct {
+		Slug string `json:"slug"`
+		Name string `json:"name"`
+	} `json:"region"`
+	Size     cloudSize `json:"size"`
 	Networks struct {
 		V4 []struct {
 			IP   string `json:"ip_address"`
@@ -388,6 +438,9 @@ func (d *CloudDeployment) profile(ip string) Profile {
 }
 
 func (c *cloudService) deploy(ctx context.Context, confirmation string) error {
+	if c.intent != "create" || !c.canCreate() {
+		return errors.New("请先明确选择新建服务器并完成创建权限授权")
+	}
 	if c.state.Deployment != nil {
 		return c.resume(ctx)
 	}
@@ -554,6 +607,9 @@ func runCloud(input *bufio.Reader) error {
 		return errors.New("云配置格式无效")
 	}
 	service := newCloudService()
+	if initial.Intent == "create" {
+		service.intent = "create"
+	}
 	if initial.State != nil {
 		service.state = *initial.State
 	}
@@ -594,7 +650,7 @@ func runCloud(input *bufio.Reader) error {
 			return errors.New("云配置操作已停止")
 		}
 	}
-	emit(map[string]any{"event": "cloudReady", "authorized": service.state.AccessToken != "", "hasDeployment": service.state.Deployment != nil})
+	emit(map[string]any{"event": "cloudReady", "authorized": service.state.AccessToken != "", "hasDeployment": service.state.Deployment != nil, "canCreate": service.canCreate()})
 	for {
 		select {
 		case <-ctx.Done():
@@ -603,10 +659,32 @@ func runCloud(input *bufio.Reader) error {
 			var err error
 			switch command.Action {
 			case "login":
+				service.intent = "existing"
+				if command.Intent == "create" {
+					service.intent = "create"
+				}
 				err = service.login(ctx)
+			case "servers":
+				service.intent = "existing"
+				err = service.listExisting(ctx)
+			case "pairExisting":
+				service.intent = "existing"
+				err = service.prepareExisting(ctx, command.ServerID)
+			case "acceptPairing":
+				err = service.acceptExisting(ctx, command.Code)
 			case "plan":
+				if command.Intent != "create" {
+					err = errors.New("请先选择新建服务器")
+					break
+				}
+				service.intent = "create"
 				err = service.plan(ctx)
 			case "deploy":
+				if command.Intent != "create" {
+					err = errors.New("使用已有服务器不会创建收费资源")
+					break
+				}
+				service.intent = "create"
 				err = service.deploy(ctx, command.ID)
 			case "resume":
 				err = service.resume(ctx)
@@ -614,7 +692,12 @@ func runCloud(input *bufio.Reader) error {
 				err = errors.New("云操作无效")
 			}
 			if err != nil {
-				emit(map[string]any{"event": "cloudError", "message": err.Error(), "hasDeployment": service.state.Deployment != nil})
+				code := "cloud_request"
+				var provider cloudHTTPError
+				if errors.As(err, &provider) && provider.status == 401 {
+					code = "authorization"
+				}
+				emit(map[string]any{"event": "cloudError", "message": err.Error(), "code": code, "hasDeployment": service.state.Deployment != nil})
 			}
 		}
 	}

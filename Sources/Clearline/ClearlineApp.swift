@@ -44,7 +44,7 @@ import ClearlineKit
                 RoutingModeMenu().environmentObject(model)
             }
             CommandMenu("工具") {
-                Button("设置 DigitalOcean…") { model.showCloudSetup = true }.disabled(model.connected || model.busy || model.loadingProfiles)
+                Button("连接设置…") { model.showCloudSetup = true }.disabled(model.busy || model.loadingProfiles)
                 Button("恢复网络") { model.recover() }.disabled(model.connected || model.busy)
                 Button("复制终端代理命令") { model.copyTerminalProxy() }.disabled(!model.connected)
             }
@@ -124,6 +124,9 @@ struct MainView: View {
             Text(model.statusTitle)
                 .font(.system(size: 24, weight: .medium))
                 .accessibilityAddTraits(.updatesFrequently)
+            if let profile = model.selected {
+                Text(profile.name).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2).padding(.horizontal, 24).padding(.top, 6)
+            }
             if let message = model.actionMessage {
                 Text(message).font(.system(size: 12)).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
@@ -145,7 +148,11 @@ struct MainView: View {
         .background(Color(NSColor.windowBackgroundColor))
         .sheet(isPresented: $model.showImport) { ImportView().environmentObject(model) }
         .sheet(isPresented: $model.showTransfer) { TransferView(importing: model.transferImport).environmentObject(model) }
-        .sheet(isPresented: $model.showCloudSetup) { CloudSetupView().environmentObject(model) }
+        .sheet(isPresented: $model.showCloudSetup, onDismiss: {
+            if model.importAfterSetup { model.importAfterSetup = false; model.openTransfer(importing: true) }
+            else if model.connectAfterSetup { model.connectAfterSetup = false; model.connect() }
+        }) { ConnectionSetupView().environmentObject(model) }
+        .sheet(isPresented: $model.showNetworkCheck) { NetworkCheckView().environmentObject(model) }
         .onOpenURL { url in
             guard !model.connected, !model.busy else { return }
             if url.pathExtension == "clearline" {

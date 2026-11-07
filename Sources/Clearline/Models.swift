@@ -14,15 +14,14 @@ struct Profile: Codable, Identifiable, Hashable {
     }
 }
 
-enum KeychainStore {
-    static let service = "org.clearline.client.profiles"
+enum KeychainAccess {
     private static let accessLock = NSLock()
 
     // The login keychain uses the legacy macOS API. Its interaction setting
     // also needs to be disabled for a noninteractive startup read; the SecItem
     // query flag alone can leave a legacy item waiting for an invisible prompt.
     // Serialize all our access while changing this process-local setting.
-    private static func withInteraction<T>(_ allowed: Bool, operation: () throws -> T) throws -> T {
+    static func withInteraction<T>(_ allowed: Bool, operation: () throws -> T) throws -> T {
         accessLock.lock(); defer { accessLock.unlock() }
         var previous: DarwinBoolean = true
         guard SecKeychainGetUserInteractionAllowed(&previous) == errSecSuccess,
@@ -32,8 +31,12 @@ enum KeychainStore {
         defer { SecKeychainSetUserInteractionAllowed(previous.boolValue) }
         return try operation()
     }
+}
+
+enum KeychainStore {
+    static let service = "org.clearline.client.profiles"
     static func load(interactionAllowed: Bool = false) throws -> [Profile] {
-        try withInteraction(interactionAllowed) {
+        try KeychainAccess.withInteraction(interactionAllowed) {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "profiles", kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne, kSecUseAuthenticationUI as String: interactionAllowed ? kSecUseAuthenticationUIAllow : kSecUseAuthenticationUIFail]
         var result: CFTypeRef?
         let code = SecItemCopyMatching(query as CFDictionary, &result)
@@ -43,7 +46,7 @@ enum KeychainStore {
         }
     }
     static func save(_ profiles: [Profile]) throws {
-        try withInteraction(true) {
+        try KeychainAccess.withInteraction(true) {
         let data = try JSONEncoder().encode(profiles)
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "profiles"]
         let code = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)

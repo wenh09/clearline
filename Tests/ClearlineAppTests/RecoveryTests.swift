@@ -6,7 +6,7 @@ import Darwin
 @testable import Clearline
 
 @MainActor final class RecoveryTests: XCTestCase {
-    private func fixture(failures: Int, permanent: Bool = false, retained: Bool = false, monitorSystemEvents: Bool = false, pause: @escaping (Int) -> TimeInterval = { Double($0) * 0.005 }) throws -> (AppModel, URL) {
+    private func fixture(failures: Int, permanent: Bool = false, retained: Bool = false, monitorSystemEvents: Bool = false, pause: @escaping (Int) -> TimeInterval = { Double($0) * 0.005 }, preflight: @escaping (Profile, Int?, Bool) async -> NetworkPreflight = { _, _, _ in .init() }) throws -> (AppModel, URL) {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("Clearline-recovery-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let quoted = "'" + folder.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
@@ -67,7 +67,7 @@ import Darwin
         }
         for path in [core, agent] { try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path.path) }
         // These fixtures neither read Keychain nor touch system network settings.
-        let model = AppModel(configurationLoader: { _ in [Profile(id: "fixture", name: "test", kind: "hysteria2", config: "hy2://fixture@127.0.0.1")] }, coreExecutable: core, agentExecutable: agent, recoveryFile: folder.appendingPathComponent("network.plist"), monitorSystemEvents: monitorSystemEvents, reconnectPause: pause, connectionCheckPause: 10_000_000)
+        let model = AppModel(configurationLoader: { _ in [Profile(id: "fixture", name: "test", kind: "hysteria2", config: "hy2://fixture@127.0.0.1")] }, coreExecutable: core, agentExecutable: agent, recoveryFile: folder.appendingPathComponent("network.plist"), monitorSystemEvents: monitorSystemEvents, reconnectPause: pause, connectionCheckPause: 10_000_000, assistantStatus: AssistantStatusStore(), preflight: preflight)
         return (model, folder)
     }
     private func count(_ folder: URL) -> Int {
@@ -93,6 +93,31 @@ import Darwin
         XCTAssertEqual(count(folder), 8)
         XCTAssertNil(model.statusNote)
         XCTAssertNil(model.retryUntil)
+        await stop(model, folder)
+    }
+    func testProxyConflictIsShownBeforeTransportAndCanBeRechecked() async throws {
+        var checks = 0
+        let (model, folder) = try fixture(failures: 0, preflight: { _, _, _ in
+            checks += 1
+            return checks == 1 ? NetworkPreflight(serverUsesVPNRoute: true, shadowrocketDetected: true, bypassAddress: "192.0.2.10/32") : NetworkPreflight()
+        })
+        await loaded(model); model.connect()
+        await until { model.showNetworkCheck }
+        XCTAssertEqual(count(folder), 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("agent-pid").path))
+        model.connect(); await until { model.connected }
+        XCTAssertEqual(checks, 2); XCTAssertEqual(count(folder), 1)
+        await stop(model, folder)
+    }
+    func testCancelDuringPreflightNeverStartsLateConnection() async throws {
+        let (model, folder) = try fixture(failures: 0, preflight: { _, _, _ in
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            return NetworkPreflight()
+        })
+        await loaded(model); model.connect(); model.disconnect()
+        await until { model.state == .idle }
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(count(folder), 0); XCTAssertFalse(model.checkingPreflight)
         await stop(model, folder)
     }
     func testManualDisconnectCancelsPendingRetry() async throws {

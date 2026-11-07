@@ -8,28 +8,41 @@ private to that user. Never use a developer's personal server as a default.
 
 1. Read README.md and inspect the installed version and proxy ownership.
    Keep the user's working connection online during installation or updates.
-2. Install the signed release or build with scripts/build.sh. Launch Clearline
-   and open “设置 DigitalOcean”. The user completes login, OAuth consent and
-   macOS security or keychain prompts themselves.
-3. The app reads current cloud prices. Present the selected region and quoted
-   price. The user explicitly approves the recurring expense in the app
-   before deployment. Account inspection authorization does not authorize
-   creation of billable resources.
-4. Let the app create and verify its isolated Droplet. Resume its existing
-   deployment after interruptions. Never repeat an uncertain create request
-   or modify unrelated Droplets to work around an error.
-5. Check the saved connection and built-in exit verification. Report actual
+2. Install the signed release or build with scripts/build.sh. Open “连接设置”.
+   Default to “已有服务器”: authorize the owner's account, list existing
+   Droplets, and preserve the selected server and its current plan. Do not
+   infer that an empty local profile list means a new server is needed.
+3. The user completes login, OAuth consent and macOS/keychain prompts.
+   Reopen the current OAuth URL in the chosen browser before restarting an
+   authorization; signing in to the dashboard alone is not OAuth consent.
+4. Read an existing Hysteria 2 connection through the app. It uses trusted,
+   noninteractive SSH or an encrypted, one-time official-console pairing.
+   The reader does not install packages, change services or install SSH keys.
+   Never copy plaintext server credentials or private protocol events into AI
+   tools. Existing WireGuard clients require their own identity/configuration.
+5. Run the connection preflight. Resolve other VPN routes to the server
+   endpoint, preserve working connectivity, then connect and verify the exit.
+6. Only if the user separately chooses “新建服务器”, request create permission
+   and show the actual quote. The user approves recurring expense in the app.
+   Resume uncertain deployments; never repeat an uncertain create request or
+   modify unrelated Droplets to work around an error.
+7. Check the saved connection and built-in exit verification. Report actual
    checks separately from tests or simulated results. Do not open or log into
    an AI account to prove network connectivity without permission.
 
 Read the credential-free progress summary at
 `~/Library/Application Support/Clearline/setup-status.json` to inspect progress.
+Schema 2 has separate `connection` and `cloud` sections. Top-level
+`connectionSaved` and `connected` come from the actual client, not the cloud
+wizard. Cloud app-deployment records do not describe every existing Droplet.
 It excludes account IDs, server IPs, tokens, URLs and connection contents.
-Ask for the displayed error when `needsAttention` is true; do not retrieve
-keychain secrets.
+Use the displayed error when attention is needed; do not retrieve keychain
+secrets or infer a need to buy resources from an inactive cloud quote.
 
-CloudState events from `clearline-core cloud` are a private GUI protocol and
-contain secrets. Never pipe them into chat, logs, shared files or an AI tool.
+Cloud state/profile events from `clearline-core cloud` are a private GUI
+protocol and contain secrets. Never pipe them into chat, logs, shared files
+or an AI tool. Pairing codes are encrypted, bound to a server/session and
+usable once; they expire after 15 minutes.
 Use the application for authorization, persistence and paid deployment.
 Opening the app does not authorize cloud account changes by an AI agent.
 

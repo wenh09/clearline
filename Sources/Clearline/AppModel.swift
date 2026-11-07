@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Network
 import ClearlineKit
+import Combine
 
 @MainActor final class AppModel: ObservableObject {
     enum State: String { case idle = "准备连接", connecting = "正在连接", connected = "已连接", reconnecting = "正在恢复连接", disconnecting = "正在断开", failed = "连接未完成" }
@@ -189,6 +190,12 @@ import ClearlineKit
     @Published var activity: [String] = []
     @Published var showImport = false
     @Published var showCloudSetup = false
+    @Published var showNetworkCheck = false
+    @Published private(set) var checkingPreflight = false
+    @Published private(set) var networkPreflight: NetworkPreflight?
+    var connectAfterSetup = false
+    var verifyAfterSetup = false
+    var importAfterSetup = false
     @Published var showTransfer = false
     @Published var transferImport = false
     @Published var transferFile: URL?
@@ -223,18 +230,27 @@ import ClearlineKit
     private let pathMonitor = NWPathMonitor()
     private var lastPath: NWPath.Status?
     private var activationObserver: NSObjectProtocol?
+    let assistantStatus: AssistantStatusStore
+    private var statusObserver: AnyCancellable?
+    private var statusUpdatePending = false
+    private let preflightInspector: (Profile, Int?, Bool) async -> NetworkPreflight
+    private let profileSaver: ([Profile]) throws -> Void
+    private let profileValidator: (Profile) async throws -> Void
+    private var preflightTask: Task<Void, Never>?
+    private var preflightID: UUID?
 
     var selected: Profile? { profiles.first { $0.kind == "hysteria2" } ?? profiles.first }
     var statusTitle: String {
+        if checkingPreflight { return "检查本机网络" }
         if loadingProfiles { return "读取配置中" }
         if storageError { return "需要解锁配置" }
-        if profiles.isEmpty { return "设置 DigitalOcean" }
+        if profiles.isEmpty { return "设置连接" }
         return state == .idle ? "未连接" : state.rawValue
     }
     var primaryActionTitle: String {
         if connected || busy { return "断开连接" }
         if storageError { return "解锁配置" }
-        if profiles.isEmpty { return "设置 DigitalOcean" }
+        if profiles.isEmpty { return "设置连接" }
         return "连接"
     }
     var actionMessage: String? {
@@ -257,7 +273,7 @@ import ClearlineKit
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString("export HTTPS_PROXY=http://127.0.0.1:\(port) HTTP_PROXY=http://127.0.0.1:\(port)", forType: .string)
     }
-    var busy: Bool { [.connecting, .reconnecting, .disconnecting].contains(state) }
+    var busy: Bool { checkingPreflight || [.connecting, .reconnecting, .disconnecting].contains(state) }
     var connected: Bool { state == .connected }
     var backupURL: URL { recoveryFile }
     var recoveryNeeded: Bool { FileManager.default.fileExists(atPath: backupURL.path) && !connected }
@@ -268,11 +284,24 @@ import ClearlineKit
          recoveryFile: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Clearline/network-restore.plist"),
          monitorSystemEvents: Bool = true,
          reconnectPause: @escaping (Int) -> TimeInterval = { Double($0) },
-         connectionCheckPause: UInt64 = 500_000_000) {
+         connectionCheckPause: UInt64 = 500_000_000,
+         assistantStatus: AssistantStatusStore? = nil,
+         preflight: @escaping (Profile, Int?, Bool) async -> NetworkPreflight = NetworkPreflight.inspect,
+         saveProfiles: @escaping ([Profile]) throws -> Void = KeychainStore.save,
+         validateProfile: ((Profile) async throws -> Void)? = nil) {
+        self.assistantStatus = assistantStatus ?? .shared
+        self.preflightInspector = preflight; self.profileSaver = saveProfiles
+        self.profileValidator = validateProfile ?? { profile in _ = try await CoreRPC.call("validate", ["profile": CoreRPC.dictionary(profile)]) }
         self.configurationLoader = configurationLoader; self.coreExecutable = coreExecutable; self.agentExecutable = agentExecutable
         self.recoveryFile = recoveryFile; self.reconnectPause = reconnectPause; self.connectionCheckPause = connectionCheckPause
         if UserDefaults.standard.string(forKey: "routingMode") == "claude" { UserDefaults.standard.set("ai", forKey: "routingMode") }
         reloadProfiles()
+        statusObserver = objectWillChange.sink { [weak self] _ in
+            guard let self, !self.statusUpdatePending else { return }
+            self.statusUpdatePending = true
+            DispatchQueue.main.async { [weak self] in self?.statusUpdatePending = false; self?.writeAssistantStatus() }
+        }
+        writeAssistantStatus()
         guard monitorSystemEvents else { return }
         pathMonitor.pathUpdateHandler = { [weak self] path in
             let signature = NetworkPathSignature.capture(path)
@@ -343,6 +372,23 @@ import ClearlineKit
     }
     func toggle() { if connected || busy { disconnect() } else if storageError { reloadProfiles(interactionAllowed: true) } else if profiles.isEmpty { showImport = true } else { connect() } }
     func connect() {
+        guard !connected, !busy, let profile = selected else { return }
+        let id = UUID(); preflightID = id; checkingPreflight = true; showNetworkCheck = false
+        let shadowrocket = NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.liguangming.Shadowrocket" }
+        preflightTask = Task {
+            let report = await preflightInspector(profile, httpPort, shadowrocket)
+            guard !Task.isCancelled, preflightID == id else { return }
+            checkingPreflight = false; preflightID = nil; networkPreflight = report
+            if report.requiresAcknowledgement { showNetworkCheck = true; return }
+            startConnection()
+        }
+    }
+    func continueAfterNetworkCheck() {
+        guard !checkingPreflight, !connected, !busy else { return }
+        showNetworkCheck = false; startConnection()
+    }
+    func cancelNetworkCheck() { showNetworkCheck = false; networkPreflight = nil }
+    private func startConnection() {
         guard let profile = selected else { return }
         wantsConnection = true; backoff.reset(); waitingForNetwork = false
         session = UUID(); let token = session
@@ -434,6 +480,7 @@ import ClearlineKit
             lastFailureRetryable = event["retryable"] as? Bool ?? true
             let text = event["message"] as? String ?? "连接失败"
             message = text == "context deadline exceeded" ? "连接服务器超时" : text
+            if lastFailureRetryable, networkPreflight?.serverUsesVPNRoute == true { message = "握手未完成，服务器入口仍经过其他 VPN。请为入口设置直连后重新检查。" }
             statusNote = message; log(message)
         default: break
         }
@@ -442,7 +489,9 @@ import ClearlineKit
         guard transportReady, proxyApplied else { return }
         finishProgress(); connectMs = connectionProgress.map { Int($0.elapsed(at: operationNow) * 1000) }
         state = .connected; connectedAt = Date(); backoff.reset(); statusNote = nil; retryUntil = nil
+        networkPreflight = nil
         message = "浏览器与遵循系统代理的应用已接入"; connectTimeout?.cancel()
+        if verifyAfterSetup { verifyAfterSetup = false; verifyExit() }
     }
     private func makeAgent() -> JSONChild { JSONChild(executable: agentExecutable, arguments: []) }
     private func configureAgent(http: Int, socks: Int, pid: Int32, token: UUID) {
@@ -508,6 +557,7 @@ import ClearlineKit
         return true
     }
     func disconnect() {
+        preflightTask?.cancel(); preflightID = nil; checkingPreflight = false; showNetworkCheck = false
         wantsConnection = false; waitingForNetwork = false; networkCheckTask?.cancel(); retryTask?.cancel(); connectTimeout?.cancel(); session = UUID(); state = .disconnecting
         let token = session
         startProgress(.disconnect, phase: .restoring)
@@ -568,16 +618,16 @@ import ClearlineKit
         let raw = config.trimmingCharacters(in: .whitespacesAndNewlines)
         let kind = raw.hasPrefix("hy2://") || raw.hasPrefix("hysteria2://") ? "hysteria2" : "awg"
         let p = Profile(name: name.isEmpty ? "我的连接" : name, kind: kind, config: raw)
-        _ = try await CoreRPC.call("validate", ["profile": CoreRPC.dictionary(p)])
+        try await profileValidator(p)
         guard !profiles.contains(where: { $0.config == raw }) else { throw NSError(domain: "Clearline", code: 1, userInfo: [NSLocalizedDescriptionKey: "这条连接已经导入。请为另一台 Mac 使用独立配置。 "]) }
-        var updated = profiles; updated.append(p); try KeychainStore.save(updated); profiles = updated; log("连接已保存到本机钥匙串")
+        var updated = profiles; updated.append(p); try profileSaver(updated); profiles = updated; log("连接已保存到本机钥匙串")
     }
     func importCloudProfile(_ profile: Profile) async throws {
         guard !connected, !busy, !storageError else { throw CocoaError(.fileWriteNoPermission) }
-        _ = try await CoreRPC.call("validate", ["profile": CoreRPC.dictionary(profile)])
-        var updated = profiles.filter { $0.id != profile.id }
+        try await profileValidator(profile)
+        var updated = profiles.filter { $0.id != profile.id && $0.config != profile.config }
         updated.insert(profile, at: 0)
-        try KeychainStore.save(updated); profiles = updated
+        try profileSaver(updated); profiles = updated
     }
     func export(password: String, url: URL) async throws {
         let result = try await CoreRPC.call("seal", ["profiles": CoreRPC.dictionary(profiles), "password": password])
@@ -591,11 +641,21 @@ import ClearlineKit
         guard let value = result.first?["profiles"], let imported = try? JSONDecoder().decode([Profile].self, from: JSONSerialization.data(withJSONObject: value)) else { throw CocoaError(.fileReadCorruptFile) }
         var updated = profiles
         for var p in imported where !updated.contains(where: { $0.config == p.config }) { p.id = UUID().uuidString; updated.append(p) }
-        try KeychainStore.save(updated); profiles = updated; log("加密迁移文件已导入")
+        try profileSaver(updated); profiles = updated; log("加密迁移文件已导入")
     }
     func quit() {
+        preflightTask?.cancel(); preflightID = nil
         wantsConnection = false; waitingForNetwork = false; networkCheckTask?.cancel(); retryTask?.cancel(); connectTimeout?.cancel(); session = UUID()
         let token = session
         Task { guard await clean(), session == token else { return }; NSApp.terminate(nil) }
+    }
+    private func writeAssistantStatus() {
+        let country = exitVerification?.country
+        let safeCountry = country?.range(of: "^[A-Z]{2}$", options: .regularExpression) != nil ? country : nil
+        let error: String? = storageError ? "storage_locked" : state == .failed ? "connection_failed" : showNetworkCheck ? "proxy_conflict" : exitError != nil ? "exit_verification_failed" : nil
+        let code: String
+        if checkingPreflight { code = "checking_network" }
+        else { switch state { case .idle: code = "idle"; case .connecting: code = "connecting"; case .connected: code = "connected"; case .reconnecting: code = "reconnecting"; case .disconnecting: code = "disconnecting"; case .failed: code = "failed" } }
+        assistantStatus.updateConnection(.init(loaded: !loadingProfiles && !storageError, profileCount: profiles.count, state: code, routingMode: routingMode.rawValue, phase: connectionProgress?.phase.rawValue, connected: connected, busy: busy, storageLocked: storageError, exitVerified: connected && exitVerification != nil, exitCountry: connected ? safeCountry : nil, networkConflict: networkPreflight?.requiresAcknowledgement == true, errorCode: error))
     }
 }
