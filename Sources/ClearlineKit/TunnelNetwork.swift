@@ -45,6 +45,15 @@ public final class TunnelNetwork {
         let encoder = PropertyListEncoder(); encoder.outputFormat = .binary
         try encoder.encode(journal).write(to: journalURL, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: journalURL.path)
+        // Persist both the new inode and atomic rename before touching DNS/routes.
+        for path in [journalURL.path, journalURL.deletingLastPathComponent().path] {
+            let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            guard fd >= 0 else { throw TunnelNetworkFailure("无法同步网络恢复记录") }
+            let synced = fsync(fd) == 0
+            if path == journalURL.path { _ = fcntl(fd, F_FULLFSYNC) }
+            close(fd)
+            guard synced else { throw TunnelNetworkFailure("无法同步网络恢复记录") }
+        }
         active = journal
     }
     private func prepareDirectory() throws {

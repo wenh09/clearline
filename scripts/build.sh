@@ -105,6 +105,14 @@ PYCOMP
 pkgbuild --root "$app_payload" --component-plist "$installer_parts/components.plist" --ownership recommended --scripts "$installer_parts/scripts" --identifier org.clearline.client.pkg --version 0.3.0.4 "$installer_parts/ClearlineApplication.pkg" >/dev/null
 cp "$app/Contents/Resources/ClearlineSystemTunnel.pkg" "$installer_parts/"
 productbuild --synthesize --product Resources/InstallerRequirements.plist --package "$installer_parts/ClearlineApplication.pkg" --package "$installer_parts/ClearlineSystemTunnel.pkg" "$installer_parts/distribution.xml" >/dev/null
+python3 - "$installer_parts/distribution.xml" <<'PYTITLE'
+import sys, xml.etree.ElementTree as ET
+tree = ET.parse(sys.argv[1])
+title = tree.getroot().find('title')
+if title is None: title = ET.SubElement(tree.getroot(), 'title')
+title.text = 'Clearline'
+tree.write(sys.argv[1], encoding='utf-8', xml_declaration=True)
+PYTITLE
 productbuild --distribution "$installer_parts/distribution.xml" --package-path "$installer_parts" "$out/Clearline-macOS-installer.pkg" >/dev/null
 rm -rf "$app_payload" "$installer_parts"
 python3 - "$app" "$out/Clearline-macOS-universal.zip" <<'PYZIP'
