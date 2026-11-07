@@ -45,8 +45,9 @@ import ClearlineKit
             }
             CommandMenu("工具") {
                 Button("连接设置…") { model.showCloudSetup = true }.disabled(model.busy || model.loadingProfiles)
+                Button("检查 DNS / UDP 隧道…") { model.showTunnelDiagnostic = true }.disabled(model.busy || model.loadingProfiles || model.packetTunnelActive)
                 Button("恢复网络") { model.recover() }.disabled(model.connected || model.busy)
-                Button("安装/更新网络组件…") { TunnelService.openInstaller() }.disabled(model.packetTunnelActive || model.busy)
+                Button("安装/更新网络组件…") { TunnelService.openInstaller() }.disabled(model.packetTunnelActive || model.busy || model.diagnosticRunning)
                 Button("复制终端代理命令") { model.copyTerminalProxy() }.disabled(!model.connected)
             }
             CommandGroup(replacing: .appTermination) {
@@ -137,6 +138,12 @@ struct MainView: View {
                 .padding(.top, 8)
             RoutingModeControl().environmentObject(model)
                 .padding(.top, 10)
+            if let note = model.fallbackNotice {
+                Text(note).font(.system(size: 11)).foregroundStyle(.orange).multilineTextAlignment(.center).padding(.horizontal, 20)
+            }
+            if let note = model.proxyOwnershipNote {
+                Text(note).font(.system(size: 11)).foregroundStyle(.orange).multilineTextAlignment(.center).padding(.horizontal, 20)
+            }
             if model.connected {
                 Text(model.packetTunnelActive ? "DNS / UDP 已接管" : "系统代理 · DNS / UDP 未接管")
                     .font(.system(size: 11)).foregroundStyle(model.packetTunnelActive ? accent : .secondary).padding(.top, 5)
@@ -158,6 +165,7 @@ struct MainView: View {
             else if model.connectAfterSetup { model.connectAfterSetup = false; model.connect() }
         }) { ConnectionSetupView().environmentObject(model) }
         .sheet(isPresented: $model.showNetworkCheck) { NetworkCheckView().environmentObject(model) }
+        .sheet(isPresented: $model.showTunnelDiagnostic) { TunnelDiagnosticView().environmentObject(model) }
         .sheet(isPresented: $model.needsTunnelApproval) {
             VStack(alignment: .leading, spacing: 16) {
                 Text("安装系统隧道组件").font(.title2.weight(.semibold))
@@ -208,7 +216,7 @@ private struct RoutingModeControl: View {
                     .accessibilityLabel(mode.title)
                     .accessibilityValue(model.routingMode == mode ? "已选择" : "未选择")
                     .help(mode.help)
-                    .disabled(model.busy || model.loadingProfiles)
+                    .disabled(model.busy || model.loadingProfiles || model.diagnosticRunning)
             }
         }.padding(4)
             .background(RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.045)))
@@ -320,7 +328,7 @@ private struct SpeedResultsView: View {
         VStack(spacing: 4) {
             siteRow("Claude 网站", sample: model.speedReport?.claude, fallbackRoute: "tunnel")
                 .help("匿名 HEAD 请求 Claude 网站，显示到首字节的响应时间。403 表示验证页或受限，不代表登录后的可用性。")
-            siteRow("普通网络", sample: model.speedReport?.ordinary, fallbackRoute: model.connected && model.routingMode == .all ? "tunnel" : "direct")
+            siteRow("普通网络", sample: model.speedReport?.ordinary, fallbackRoute: model.connected && model.routingMode != .ai ? "tunnel" : "direct")
                 .help("主数字为 3 次首次访问的响应中位数；连续访问时间来自实际复用连接。按当前范围走代理或直连。")
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
@@ -353,7 +361,7 @@ private struct SpeedResultsView: View {
         if let sample = model.speedReport?.download {
             return routeTitle(sample.route) + " · " + (sample.ok ? String(format: "5 MB · %.1f s · 含建连", Double(sample.durationMs)/1000) : sample.message)
         }
-        return "最多 5 MB · " + (model.connected && model.routingMode == .all ? "代理" : "直连")
+        return "最多 5 MB · " + (model.connected && model.routingMode != .ai ? "代理" : "直连")
     }
 }
 

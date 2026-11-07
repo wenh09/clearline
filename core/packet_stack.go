@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -44,6 +46,30 @@ type packetStack struct {
 	slots       chan struct{}
 	once        sync.Once
 	up, down    atomic.Int64
+	failureLock sync.Mutex
+	failure     error
+}
+
+func (p *packetStack) deviceFailure(operation string, err error) {
+	if p.ctx.Err() != nil {
+		return
+	}
+	var code syscall.Errno
+	message := "虚拟网卡" + operation + "失败"
+	if errors.As(err, &code) {
+		message += fmt.Sprintf("（系统错误 %d）", code)
+	}
+	p.failureLock.Lock()
+	if p.failure == nil {
+		p.failure = errors.New(message)
+	}
+	p.failureLock.Unlock()
+	p.cancel()
+}
+func (p *packetStack) deviceError() error {
+	p.failureLock.Lock()
+	defer p.failureLock.Unlock()
+	return p.failure
 }
 
 func newPacketStack(parent context.Context, device packetDevice, tunnel Tunnel) (*packetStack, error) {
@@ -106,7 +132,7 @@ func newPacketStack(parent context.Context, device packetDevice, tunnel Tunnel) 
 		for {
 			n, e := device.Read(b)
 			if e != nil {
-				p.cancel()
+				p.deviceFailure("读取", e)
 				return
 			}
 			if n < 1 {
@@ -139,7 +165,7 @@ func newPacketStack(parent context.Context, device packetDevice, tunnel Tunnel) 
 			view.Release()
 			packet.DecRef()
 			if err != nil {
-				p.cancel()
+				p.deviceFailure("写入", err)
 				return
 			}
 		}

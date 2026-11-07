@@ -2,6 +2,14 @@ import XCTest
 @testable import ClearlineKit
 
 final class ProxyRestoreTests: XCTestCase {
+    func testConnectionDoesNotImplySystemProxyOwnership() {
+        let own: [String:Any] = ["HTTPEnable":1,"HTTPProxy":"127.0.0.1","HTTPPort":18777,"HTTPSEnable":1,"HTTPSProxy":"127.0.0.1","HTTPSPort":18777]
+        XCTAssertTrue(ProxySnapshot.owns(own, httpPort:18777))
+        var other = own; other["HTTPSPort"] = 1082
+        XCTAssertFalse(ProxySnapshot.owns(other, httpPort:18777))
+        other = own; other["ProxyAutoConfigEnable"] = 1
+        XCTAssertFalse(ProxySnapshot.owns(other, httpPort:18777))
+    }
     func testRestorePreviousProxyAndRemovePreviouslyAbsentKeys() {
         let old: [String: Any] = ["HTTPEnable": 0, "ExceptionsList": ["internal.example"]]
         let installed: [String: Any] = ["HTTPEnable": 1, "HTTPProxy": "127.0.0.1", "HTTPPort": 12345]

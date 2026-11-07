@@ -12,6 +12,14 @@ public enum NetworkFailure: LocalizedError {
 }
 
 public enum ProxySnapshot {
+    public static func ownsSystemProxy(httpPort: Int) -> Bool { owns(SCDynamicStoreCopyProxies(nil) as? [String: Any] ?? [:], httpPort: httpPort) }
+    public static func owns(_ settings: [String: Any], httpPort: Int) -> Bool {
+        ["HTTP", "HTTPS"].allSatisfy { prefix in
+            (settings[prefix + "Enable"] as? NSNumber)?.boolValue == true &&
+            settings[prefix + "Proxy"] as? String == "127.0.0.1" &&
+            (settings[prefix + "Port"] as? NSNumber)?.intValue == httpPort
+        } && (settings["ProxyAutoConfigEnable"] as? NSNumber)?.boolValue != true
+    }
     public static let groups = [["HTTPEnable", "HTTPProxy", "HTTPPort"], ["HTTPSEnable", "HTTPSProxy", "HTTPSPort"], ["SOCKSEnable", "SOCKSProxy", "SOCKSPort"], ["ProxyAutoConfigEnable"], ["ProxyAutoDiscoveryEnable"]]
     public static let keys = groups.flatMap { $0 }
     private static func same(_ a: Any?, _ b: Any?) -> Bool {

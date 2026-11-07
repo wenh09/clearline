@@ -57,6 +57,7 @@ type packetSession struct {
 }
 
 func (s *packetSession) bytes() (int64, int64) { return s.stack.up.Load(), s.stack.down.Load() }
+func (s *packetSession) deviceError() error    { return s.stack.deviceError() }
 
 func rootAgentConnection(ctx context.Context) (*net.UnixConn, error) {
 	c, e := (&net.Dialer{}).DialContext(ctx, "unix", tunnelAgentSocket)
@@ -81,6 +82,12 @@ func rootAgentConnection(ctx context.Context) (*net.UnixConn, error) {
 	return u, nil
 }
 func startPacketSession(ctx context.Context, t Tunnel, endpoint string) (*packetSession, error) {
+	return openPacketSession(ctx, t, endpoint, "enable")
+}
+func startPacketProbe(ctx context.Context, t Tunnel) (*packetSession, error) {
+	return openPacketSession(ctx, t, "", "probe")
+}
+func openPacketSession(ctx context.Context, t Tunnel, endpoint, action string) (*packetSession, error) {
 	c, e := rootAgentConnection(ctx)
 	if e != nil {
 		return nil, e
@@ -94,7 +101,7 @@ func startPacketSession(ctx context.Context, t Tunnel, endpoint string) (*packet
 	c.SetDeadline(time.Now().Add(25 * time.Second))
 	stop := context.AfterFunc(ctx, func() { c.Close() })
 	defer stop()
-	if e = json.NewEncoder(c).Encode(map[string]any{"action": "enable", "endpoint": endpoint}); e != nil {
+	if e = json.NewEncoder(c).Encode(map[string]any{"action": action, "endpoint": endpoint}); e != nil {
 		return nil, e
 	}
 	data, control := make([]byte, 16384), make([]byte, unix.CmsgSpace(4))
@@ -115,8 +122,12 @@ func startPacketSession(ctx context.Context, t Tunnel, endpoint string) (*packet
 	var response struct {
 		Event   string `json:"event"`
 		Message string `json:"message"`
+		Stage   string `json:"stage"`
 	}
 	if json.Unmarshal(data[:n], &response) != nil || response.Event != "device" {
+		if response.Event == "error" && response.Message != "" {
+			return nil, errors.New("系统隧道：" + response.Message + "（" + response.Stage + "）")
+		}
 		return nil, errors.New("无法创建系统隧道，请检查网络组件版本或其他 VPN")
 	}
 	msgs, e := unix.ParseSocketControlMessage(control[:oobn])
@@ -145,21 +156,36 @@ func startPacketSession(ctx context.Context, t Tunnel, endpoint string) (*packet
 	decoder := json.NewDecoder(c)
 	if e = decoder.Decode(&response); e != nil || response.Event != "applied" {
 		p.Close()
+		if response.Event == "error" && response.Message != "" {
+			return nil, errors.New("系统隧道：" + response.Message + "（" + response.Stage + "）")
+		}
 		return nil, errors.New("系统隧道或 DNS 接管失败，已请求恢复原网络")
 	}
 	c.SetDeadline(time.Time{})
+	reportFailure := func(err error) {
+		select {
+		case s.done <- err:
+		default:
+		}
+	}
+	go func() {
+		<-p.ctx.Done()
+		if err := p.deviceError(); err != nil {
+			reportFailure(err)
+		}
+	}()
 	go func() {
 		defer close(s.restored)
 		for {
 			if e := decoder.Decode(&response); e != nil {
-				s.done <- errors.New("系统隧道服务已停止，正在恢复网络")
+				reportFailure(errors.New("系统隧道服务已停止，正在恢复网络"))
 				return
 			}
 			if response.Event == "restored" {
 				return
 			}
 			if response.Event == "error" {
-				s.done <- errors.New("系统隧道网络配置异常，请重新连接")
+				reportFailure(errors.New("系统隧道网络配置异常，请重新连接"))
 				return
 			}
 		}

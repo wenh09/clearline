@@ -29,6 +29,14 @@ final class TunnelNetworkTests: XCTestCase {
         }
     }
     private func journal() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent("Clearline-network-test-" + UUID().uuidString) }
+    func testProbeOnlyConfiguresTemporaryDeviceWithoutChangingDNSOrDefaultRoutes() throws {
+        let path = journal(); let fake = FakeNetwork(); let original = fake.dns
+        try TunnelNetwork(journalURL: path, command: fake.command).configureProbe(interface: "utun42")
+        XCTAssertEqual(fake.dns, original); XCTAssertTrue(fake.routes.isEmpty)
+        XCTAssertEqual(fake.mutations.count, 2)
+        XCTAssertTrue(fake.mutations.allSatisfy { $0[0] == "/sbin/ifconfig" && $0[1] == "utun42" })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+    }
     func testBothIPFamiliesAndDNSRestoreAfterCrash() throws {
         let path = journal(); defer { try? FileManager.default.removeItem(at: path) }
         let fake = FakeNetwork(); let original = fake.dns

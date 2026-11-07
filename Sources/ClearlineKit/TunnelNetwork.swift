@@ -12,6 +12,7 @@ public final class TunnelNetwork {
     public static let journalPath = "/Library/Application Support/Clearline/system-tunnel-state.plist"
     public static let legacyJournalPath = "/var/run/org.clearline.tunnel.state"
     public static let dnsAddress = "198.18.0.2"
+    public static let probeAddress = "192.0.2.254"
     private struct DNSSnapshot: Codable { let service: String; let before: [String] }
     private struct Journal: Codable {
         var uid: UInt32; var interface: String; var endpoint: String
@@ -34,10 +35,11 @@ public final class TunnelNetwork {
         process.standardInput = FileHandle.nullDevice
         let pipe = Pipe(); process.standardOutput = pipe; process.standardError = pipe
         let finished = DispatchSemaphore(value: 0); process.terminationHandler = { _ in finished.signal() }
+        let operation = URL(fileURLWithPath: executable).lastPathComponent + " " + (executable == "/sbin/route" ? arguments.dropFirst(2).first ?? "" : executable == "/sbin/ifconfig" ? "configure" : arguments.dropFirst().first ?? "")
         try process.run()
-        if finished.wait(timeout: .now() + 8) == .timedOut { process.terminate(); throw TunnelNetworkFailure("系统网络操作超时") }
+        if finished.wait(timeout: .now() + 8) == .timedOut { process.terminate(); throw TunnelNetworkFailure("系统网络操作超时（\(operation)）") }
         let result = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        guard process.terminationStatus == 0, !result.contains("** Error") else { throw TunnelNetworkFailure("系统网络操作失败，请检查其他 VPN 或后台服务权限") }
+        guard process.terminationStatus == 0, !result.contains("** Error") else { throw TunnelNetworkFailure("系统网络操作失败（\(operation)），请检查其他 VPN 或后台服务权限") }
         return result
     }
     private func store(_ journal: Journal) throws {
@@ -98,6 +100,13 @@ public final class TunnelNetwork {
         return values
     }
     private func flush() { _ = try? run(["/usr/bin/dscacheutil", "-flushcache"]); _ = try? run(["/usr/bin/killall", "-HUP", "mDNSResponder"]) }
+    public func configureProbe(interface: String) throws {
+        guard interface.range(of: "^utun[0-9]+$", options: .regularExpression) != nil else { throw TunnelNetworkFailure("诊断网卡名称无效") }
+        // Only this temporary device receives an address. Closing both owned
+        // FDs removes its connected host route; no physical preferences change.
+        _ = try run(["/sbin/ifconfig", interface, "inet", "192.0.2.253", Self.probeAddress, "mtu", "1280", "up"])
+        _ = try run(["/sbin/ifconfig", interface, "inet6", "fd7a:115c:a1e0:ffff::1", "prefixlen", "126", "alias"])
+    }
     public func install(interface: String, endpoint: String, uid: UInt32, clientPID: Int32? = nil) throws {
         lock.lock(); defer { lock.unlock() }
         guard interface.range(of: "^utun[0-9]+$", options: .regularExpression) != nil, Self.validIPv4(endpoint) else { throw TunnelNetworkFailure("系统隧道参数无效") }

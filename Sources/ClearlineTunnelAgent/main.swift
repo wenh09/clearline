@@ -78,24 +78,32 @@ while true {
     cl_timeout(socket, 15)
     var device: Int32 = -1
     var failed = false
+    var stage = "request"
     do {
         guard let initial = message(socket), let action = initial["action"] as? String else { throw TunnelNetworkFailure("请求无效") }
         if action == "recover" {
             try network.restore(owner: uid); event(socket, "restored")
         } else {
-            guard action == "enable", let endpoint = initial["endpoint"] as? String, TunnelNetwork.validIPv4(endpoint) else { throw TunnelNetworkFailure("入口无效") }
+            let endpoint = initial["endpoint"] as? String ?? ""
+            guard action == "probe" || (action == "enable" && TunnelNetwork.validIPv4(endpoint)) else { throw TunnelNetworkFailure("入口无效") }
+            stage = "recovery"
             try network.restore(owner: uid)
             var name = [CChar](repeating: 0, count: 32)
+            stage = "create_device"
             device = cl_tun(&name, name.count)
-            guard device >= 0, cl_send_device(socket, device) == 0,
-                  message(socket)?["action"] as? String == "ready" else { throw TunnelNetworkFailure("设备未准备好") }
-            try network.install(interface: String(cString: name), endpoint: endpoint, uid: uid, clientPID: pid)
+            guard device >= 0 else { throw TunnelNetworkFailure("无法创建虚拟网卡（系统错误 \(errno)）") }
+            stage = "device_transfer"
+            guard cl_send_device(socket, device) == 0, message(socket)?["action"] as? String == "ready" else { throw TunnelNetworkFailure("虚拟网卡描述符交接失败") }
+            stage = action == "probe" ? "configure_probe" : "network_install"
+            if action == "probe" { try network.configureProbe(interface: String(cString: name)) }
+            else { try network.install(interface: String(cString: name), endpoint: endpoint, uid: uid, clientPID: pid) }
             cl_timeout(socket, 0); event(socket, "applied")
             while let command = message(socket) { if command["action"] as? String == "disable" { break } }
             try network.restore(owner: uid); event(socket, "restored")
         }
     } catch {
-        event(socket, "error")
+        let detail = (error as? TunnelNetworkFailure)?.errorDescription ?? "系统网络操作失败"
+        if let data = try? JSONSerialization.data(withJSONObject: ["event": "error", "stage": stage, "message": detail]), let value = String(data: data, encoding: .utf8) { _ = cl_write(socket, value + "\n") }
         do { try network.restore(owner: uid) } catch { failed = true }
     }
     stateLock.lock(); currentSocket = -1; stateLock.unlock()

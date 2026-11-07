@@ -263,6 +263,12 @@ func runSession(parent context.Context, r Request, input *bufio.Reader, output f
 						return connectionError{message: e.Error()}
 					}
 					packetFailure = packets.done
+					if e = verifyGlobalPacketPath(ctx, retained); e != nil {
+						if failure := packets.deviceError(); failure != nil {
+							e = failure
+						}
+						return connectionError{message: e.Error()}
+					}
 				}
 				worker.ready = true
 				readyAt = time.Now()

@@ -332,6 +332,8 @@ func main() {
 		os.Exit(1)
 	}
 	switch os.Args[1] {
+	case "diagnoseTunnel":
+		e = diagnosePacketTunnel(r.Profile, emit)
 	case "recoverTunnel":
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		e = recoverPacketTunnel(ctx)
