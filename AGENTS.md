@@ -22,6 +22,11 @@ private to that user. Never use a developer's personal server as a default.
    tools. Existing WireGuard clients require their own identity/configuration.
 5. Run the connection preflight. Resolve other VPN routes to the server
    endpoint, preserve working connectivity, then connect and verify the exit.
+   AI split mode is a TCP system proxy and does not protect system DNS/UDP.
+   Global tunnel mode requires the matching bundled network component, which
+   the owner installs through macOS Installer with administrator approval.
+   Do not bypass that confirmation or run the credential-handling core as root.
+   Inspect packetTunnelActive/dnsProtected/udpProtected separately from exit IP.
 6. Only if the user separately chooses “新建服务器”, request create permission
    and show the actual quote. The user approves recurring expense in the app.
    Resume uncertain deployments; never repeat an uncertain create request or
@@ -61,3 +66,9 @@ Opening the app does not authorize cloud account changes by an AI agent.
   Scan archives and binary strings for credentials and local build paths.
   Swift builds use prefix maps; Go uses `-trimpath`.
 - Keep personal deployment snapshots and original Git history private.
+- The privileged tunnel helper accepts only the exact signed core hashes sealed
+  in that build. Never replace this with an identifier/path-only client check,
+  arbitrary command execution, or a user-writable signing whitelist.
+- Network tests must inject command runners and use local packet/UDP fixtures.
+  Do not change the developer's DNS/routes to run automated tests. Preserve
+  durable recovery, both IP families, entry bypass and no local DNS fallback.

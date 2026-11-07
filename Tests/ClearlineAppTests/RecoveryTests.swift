@@ -6,7 +6,7 @@ import Darwin
 @testable import Clearline
 
 @MainActor final class RecoveryTests: XCTestCase {
-    private func fixture(failures: Int, permanent: Bool = false, retained: Bool = false, monitorSystemEvents: Bool = false, pause: @escaping (Int) -> TimeInterval = { Double($0) * 0.005 }, preflight: @escaping (Profile, Int?, Bool) async -> NetworkPreflight = { _, _, _ in .init() }) throws -> (AppModel, URL) {
+    private func fixture(failures: Int, permanent: Bool = false, retained: Bool = false, monitorSystemEvents: Bool = false, pause: @escaping (Int) -> TimeInterval = { Double($0) * 0.005 }, preflight: @escaping (Profile, Int?, Bool) async -> NetworkPreflight = { _, _, _ in .init() }, prepare: @escaping () throws -> Bool = { true }) throws -> (AppModel, URL) {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("Clearline-recovery-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let quoted = "'" + folder.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
@@ -24,7 +24,7 @@ import Darwin
           printf '%s\\n' '{"event":"error","message":"fixture failure","retryable":\(permanent ? "false" : "true")}'
           exit 1
         fi
-        printf '%s\\n' '{"event":"ready","profileID":"fixture","httpPort":18777,"socksPort":18778,"latencyMs":10}'
+        printf '%s\\n' '{"event":"ready","profileID":"fixture","httpPort":18777,"socksPort":18778,"latencyMs":10,"packetTunnel":true}'
         while IFS= read -r request; do :; done
         """.write(to: core, atomically: true, encoding: .utf8)
         try """
@@ -49,7 +49,7 @@ import Darwin
             counter.write_text(str((int(counter.read_text()) if counter.exists() else 0)+1))
             def emit(event): print(json.dumps(event),flush=True)
             emit({'event':'transportState','state':'connecting','stage':'server','proxyRetained':False})
-            emit({'event':'ready','retainsProxy':True,'profileID':'fixture','httpPort':18777,'socksPort':18778,'latencyMs':10})
+            emit({'event':'ready','retainsProxy':True,'profileID':'fixture','httpPort':18777,'socksPort':18778,'latencyMs':10,'packetTunnel':initial.get('packetTunnel',False)})
             if (folder/'drop-after-ready').exists():
                 emit({'event':'transportState','state':'offline','stage':'waiting','proxyRetained':True})
             for line in sys.stdin:
@@ -67,7 +67,7 @@ import Darwin
         }
         for path in [core, agent] { try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path.path) }
         // These fixtures neither read Keychain nor touch system network settings.
-        let model = AppModel(configurationLoader: { _ in [Profile(id: "fixture", name: "test", kind: "hysteria2", config: "hy2://fixture@127.0.0.1")] }, coreExecutable: core, agentExecutable: agent, recoveryFile: folder.appendingPathComponent("network.plist"), monitorSystemEvents: monitorSystemEvents, reconnectPause: pause, connectionCheckPause: 10_000_000, assistantStatus: AssistantStatusStore(), preflight: preflight)
+        let model = AppModel(configurationLoader: { _ in [Profile(id: "fixture", name: "test", kind: "hysteria2", config: "hy2://fixture@127.0.0.1")] }, coreExecutable: core, agentExecutable: agent, recoveryFile: folder.appendingPathComponent("network.plist"), monitorSystemEvents: monitorSystemEvents, reconnectPause: pause, connectionCheckPause: 10_000_000, assistantStatus: AssistantStatusStore(), preflight: preflight, preparePacketTunnel: prepare)
         return (model, folder)
     }
     private func count(_ folder: URL) -> Int {
@@ -131,6 +131,38 @@ import Darwin
         XCTAssertEqual(model.state, .idle)
         await stop(model, folder)
     }
+    func testGlobalTunnelWaitsForOwnerApprovalWithoutStartingCore() async throws {
+        let (model, folder) = try fixture(failures: 0, prepare: { false })
+        await loaded(model); model.setRoutingMode(.all); model.connect()
+        await until { model.needsTunnelApproval }
+        XCTAssertFalse(model.connected); XCTAssertFalse(model.packetTunnelActive)
+        XCTAssertEqual(count(folder), 0)
+        model.needsTunnelApproval = false; await stop(model, folder)
+    }
+    func testGlobalModeNeverReportsProtectedWithoutPacketTunnel() async throws {
+        let (model, folder) = try fixture(failures: 0)
+        let file = folder.appendingPathComponent("core")
+        let source = try String(contentsOf: file).replacingOccurrences(of: "\"packetTunnel\":true", with: "\"packetTunnel\":false")
+        try source.write(to: file, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: file.path)
+        await loaded(model); model.setRoutingMode(.all); model.connect()
+        await until { model.state == .failed }
+        XCTAssertFalse(model.connected); XCTAssertFalse(model.packetTunnelActive)
+        XCTAssertEqual(count(folder), 1)
+        await stop(model, folder)
+    }
+    func testInstallingComponentPreservesAIUntilGlobalSwitchCanStart() async throws {
+        var allowed = false
+        let (model, folder) = try fixture(failures: 0, prepare: { allowed })
+        await loaded(model); model.setRoutingMode(.ai); model.connect(); await until { model.connected }
+        model.setRoutingMode(.all)
+        XCTAssertTrue(model.needsTunnelApproval); XCTAssertTrue(model.connected)
+        XCTAssertEqual(model.routingMode, .ai); XCTAssertEqual(count(folder), 1)
+        allowed = true; model.finishTunnelInstallation()
+        await until { model.connected && model.routingMode == .all && count(folder) == 2 }
+        XCTAssertTrue(model.packetTunnelActive)
+        await stop(model, folder)
+    }
     func testOfflineWaitCreatesNoChildAndNetworkReturnReconnects() async throws {
         let (model, folder) = try fixture(failures: 0)
         await loaded(model); model.networkChanged(.unsatisfied); model.connect()
@@ -178,7 +210,7 @@ import Darwin
         XCTAssertEqual(AppModel.RoutingMode.restoring("claude"), .ai)
         XCTAssertEqual(AppModel.RoutingMode.restoring("ai"), .ai)
         XCTAssertEqual(AppModel.RoutingMode.restoring("all"), .all)
-        XCTAssertEqual(AppModel.RoutingMode.allCases.map(\.title), ["AI 分流", "全部代理"])
+        XCTAssertEqual(AppModel.RoutingMode.allCases.map(\.title), ["AI 分流", "全局隧道"])
     }
     func testAISelectionSendsCompleteDomainRulesToCore() async throws {
         let (model, folder) = try fixture(failures: 0, retained: true)

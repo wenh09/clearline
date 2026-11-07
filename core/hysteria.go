@@ -113,6 +113,43 @@ func (t *HYTunnel) DialContext(ctx context.Context, network, address string) (ne
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if network == "udp" {
+		u, err := t.client.UDP()
+		if err != nil {
+			return nil, err
+		}
+		a, b := net.Pipe()
+		var once sync.Once
+		closeBoth := func() { once.Do(func() { u.Close(); b.Close() }) }
+		go func() {
+			defer closeBoth()
+			for {
+				packet, err := readDatagram(b)
+				if err != nil {
+					return
+				}
+				if u.Send(packet, address) != nil {
+					return
+				}
+			}
+		}()
+		go func() {
+			defer closeBoth()
+			for {
+				packet, _, err := u.Receive()
+				if err != nil {
+					return
+				}
+				if writeDatagram(b, packet) != nil {
+					return
+				}
+			}
+		}()
+		return &datagramStream{Conn: a}, nil
+	}
+	if network != "tcp" {
+		return nil, net.UnknownNetworkError(network)
+	}
 	type result struct {
 		conn net.Conn
 		err  error

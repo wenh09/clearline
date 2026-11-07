@@ -46,6 +46,7 @@ import ClearlineKit
             CommandMenu("工具") {
                 Button("连接设置…") { model.showCloudSetup = true }.disabled(model.busy || model.loadingProfiles)
                 Button("恢复网络") { model.recover() }.disabled(model.connected || model.busy)
+                Button("安装/更新网络组件…") { TunnelService.openInstaller() }.disabled(model.packetTunnelActive || model.busy)
                 Button("复制终端代理命令") { model.copyTerminalProxy() }.disabled(!model.connected)
             }
             CommandGroup(replacing: .appTermination) {
@@ -136,6 +137,10 @@ struct MainView: View {
                 .padding(.top, 8)
             RoutingModeControl().environmentObject(model)
                 .padding(.top, 10)
+            if model.connected {
+                Text(model.packetTunnelActive ? "DNS / UDP 已接管" : "系统代理 · DNS / UDP 未接管")
+                    .font(.system(size: 11)).foregroundStyle(model.packetTunnelActive ? accent : .secondary).padding(.top, 5)
+            }
             NetworkActionsView().environmentObject(model)
                 .padding(.top, 4)
             ExitVerificationView().environmentObject(model)
@@ -153,6 +158,21 @@ struct MainView: View {
             else if model.connectAfterSetup { model.connectAfterSetup = false; model.connect() }
         }) { ConnectionSetupView().environmentObject(model) }
         .sheet(isPresented: $model.showNetworkCheck) { NetworkCheckView().environmentObject(model) }
+        .sheet(isPresented: $model.needsTunnelApproval) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("安装系统隧道组件").font(.title2.weight(.semibold))
+                Text("全局隧道需要创建虚拟网卡，接管公网 TCP、UDP 与系统 DNS。请打开网络组件安装包，在 macOS 安装器中确认管理员权限，再返回轻连。更新组件前请先断开全局隧道。")
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("连接凭据不会交给后台服务。断开时会恢复原 DNS 和路由；AI 分流仍可使用系统代理。")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("稍后") { model.needsTunnelApproval = false }
+                    Spacer()
+                    Button("打开安装器") { TunnelService.openInstaller() }
+                    Button("安装完成，继续连接") { model.finishTunnelInstallation() }
+                }
+            }.padding(24).frame(width: 460)
+        }
         .onOpenURL { url in
             guard !model.connected, !model.busy else { return }
             if url.pathExtension == "clearline" {

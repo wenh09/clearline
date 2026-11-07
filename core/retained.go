@@ -69,9 +69,10 @@ func (t *retainedTunnel) Close() {
 }
 
 type workerTunnel struct {
-	dialer proxy.ContextDialer
-	ctx    context.Context
-	cancel context.CancelFunc
+	dialer         proxy.ContextDialer
+	ctx            context.Context
+	cancel         context.CancelFunc
+	address, token string
 }
 
 func newWorkerTunnel(parent context.Context, address, token string) (*workerTunnel, error) {
@@ -80,7 +81,7 @@ func newWorkerTunnel(parent context.Context, address, token string) (*workerTunn
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	return &workerTunnel{dialer: dialer.(proxy.ContextDialer), ctx: ctx, cancel: cancel}, nil
+	return &workerTunnel{dialer: dialer.(proxy.ContextDialer), ctx: ctx, cancel: cancel, address: address, token: token}, nil
 }
 func (t *workerTunnel) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	request, cancel := context.WithCancel(ctx)
@@ -89,6 +90,9 @@ func (t *workerTunnel) DialContext(ctx context.Context, network, address string)
 	defer cancel()
 	if t.ctx.Err() != nil {
 		return nil, t.ctx.Err()
+	}
+	if network == "udp" {
+		return dialWorkerUDP(request, t.address, t.token, address)
 	}
 	return t.dialer.DialContext(request, network, address)
 }

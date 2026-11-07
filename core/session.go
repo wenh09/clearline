@@ -44,6 +44,20 @@ func runSession(parent context.Context, r Request, input *bufio.Reader, output f
 	if _, err = connectionCandidates(r.Profile, r.Alternatives, r.PreferredID); err != nil {
 		return err
 	}
+	var endpoint string
+	if r.PacketTunnel {
+		if policy.Mode != "all" {
+			return errors.New("系统隧道需使用全局模式")
+		}
+		// Only matching, validated candidates may receive the entry bypass.
+		candidates, _ := connectionCandidates(r.Profile, r.Alternatives, r.PreferredID)
+		r.Profile = candidates[0]
+		r.Alternatives = candidates[1:]
+		r, endpoint, err = pinPacketEndpoint(parent, r)
+		if err != nil {
+			return err
+		}
+	}
 	ctx, cancel := context.WithCancel(parent)
 	retained := newRetainedTunnel()
 	p, err := NewProxy(retained, policy, func(host, route string) {
@@ -57,7 +71,12 @@ func runSession(parent context.Context, r Request, input *bufio.Reader, output f
 		return err
 	}
 	var worker *transportWorker
+	var packets *packetSession
+	var packetFailure <-chan error
 	defer func() {
+		if packets != nil {
+			packets.Close()
+		}
 		cancel()
 		p.Close()
 		if worker != nil {
@@ -127,7 +146,7 @@ func runSession(parent context.Context, r Request, input *bufio.Reader, output f
 			return nil
 		}
 		state("connecting", "server", "正在连接美国服务器…", 0)
-		request := Request{Profile: r.Profile, Alternatives: r.Alternatives, PreferredID: preferred, RoutingMode: "all"}
+		request := Request{Profile: r.Profile, Alternatives: r.Alternatives, PreferredID: preferred, RoutingMode: "all", PacketTunnel: r.PacketTunnel}
 		var startErr error
 		worker, startErr = startTransportWorker(ctx, request, options.command, events)
 		if startErr != nil {
@@ -157,6 +176,8 @@ func runSession(parent context.Context, r Request, input *bufio.Reader, output f
 	defer stats.Stop()
 	for {
 		select {
+		case <-packetFailure:
+			return connectionError{message: "系统隧道已中断，请检查后台服务后重新连接"}
 		case <-ctx.Done():
 			return nil
 		case <-eof:
@@ -229,10 +250,18 @@ func runSession(parent context.Context, r Request, input *bufio.Reader, output f
 					return e
 				}
 				retained.set(tunnel)
+				if r.PacketTunnel && packets == nil {
+					packets, e = startPacketSession(ctx, retained, endpoint)
+					if e != nil {
+						return connectionError{message: e.Error()}
+					}
+					packetFailure = packets.done
+				}
 				worker.ready = true
 				readyAt = time.Now()
 				preferred, _ = value["profileID"].(string)
 				event := map[string]any{"event": "ready", "retainsProxy": true, "httpPort": httpPort, "socksPort": socksPort, "latencyMs": value["latencyMs"], "profileID": preferred, "transportPID": worker.cmd.Process.Pid, "connectMs": time.Since(started).Milliseconds()}
+				event["packetTunnel"] = packets != nil
 				if everReady {
 					event["event"] = "recovered"
 					event["connectMs"] = time.Since(recoveryStarted).Milliseconds()

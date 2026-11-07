@@ -27,20 +27,39 @@ export GOMAXPROCS=4
 for arch in arm64 amd64; do
   (cd core; CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" "$go_bin" build -trimpath -ldflags='-s -w' -o "$cache/core-$arch" .)
 done
+lipo -create "$cache/core-arm64" "$cache/core-amd64" -output "$cache/core-universal"
+codesign --force --identifier org.clearline.core --sign - "$cache/core-universal"
+tunnel_info="$cache/tunnel-agent-info-$(shasum -a 256 "$cache/core-universal" | awk '{print $1}').plist"
+# The privileged daemon pins the exact signed core hashes in a read-only Mach-O
+# section. It never trusts a client PID, path, team name or user-writable file alone.
+python3 - "$cache/core-universal" "$tunnel_info" <<'PYINFO'
+import plistlib, re, subprocess, sys
+hashes = []
+for arch in ('arm64', 'x86_64'):
+    info = subprocess.check_output(['codesign', '-d', '--arch', arch, '--verbose=4', sys.argv[1]], stderr=subprocess.STDOUT, text=True)
+    hashes.append(re.search(r'^CDHash=([0-9a-f]{40})$', info, re.M).group(1))
+with open(sys.argv[2], 'wb') as out:
+    plistlib.dump({'CFBundleIdentifier': 'org.clearline.tunnel', 'ClearlineCoreHashes': hashes}, out)
+PYINFO
 for arch in arm64 x86_64; do
   swift build -c release --triple "$arch-apple-macosx13.0" --scratch-path "$cache/swift-$arch" -Xswiftc -file-prefix-map -Xswiftc "$repo=/src/clearline" -Xswiftc -file-prefix-map -Xswiftc "$HOME=/home/build" -Xswiftc -debug-prefix-map -Xswiftc "$repo=/src/clearline" > "$cache/build-$arch.log" 2>&1 || { tail -60 "$cache/build-$arch.log" >&2; exit 1; }
   bin="$(swift build -c release --triple "$arch-apple-macosx13.0" --scratch-path "$cache/swift-$arch" --show-bin-path)"
   cp "$bin/Clearline" "$cache/ui-$arch"
   cp "$bin/ClearlineNetworkAgent" "$cache/agent-$arch"
+  swift build -c release --product ClearlineTunnelAgent --triple "$arch-apple-macosx13.0" --scratch-path "$cache/tunnel-swift-$arch" -Xswiftc -file-prefix-map -Xswiftc "$repo=/src/clearline" -Xswiftc -file-prefix-map -Xswiftc "$HOME=/home/build" -Xswiftc -debug-prefix-map -Xswiftc "$repo=/src/clearline" -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$tunnel_info" > "$cache/tunnel-build-$arch.log" 2>&1 || { tail -60 "$cache/tunnel-build-$arch.log" >&2; exit 1; }
+  tunnel_bin="$(swift build -c release --triple "$arch-apple-macosx13.0" --scratch-path "$cache/tunnel-swift-$arch" --show-bin-path)"
+  cp "$tunnel_bin/ClearlineTunnelAgent" "$cache/tunnel-agent-$arch"
 done
 app="$out/Clearline.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Resources"
 lipo -create "$cache/ui-arm64" "$cache/ui-x86_64" -output "$app/Contents/MacOS/Clearline"
 lipo -create "$cache/agent-arm64" "$cache/agent-x86_64" -output "$app/Contents/Helpers/ClearlineNetworkAgent"
-lipo -create "$cache/core-arm64" "$cache/core-amd64" -output "$app/Contents/Helpers/clearline-core"
+cp "$cache/core-universal" "$app/Contents/Helpers/clearline-core"
+lipo -create "$cache/tunnel-agent-arm64" "$cache/tunnel-agent-x86_64" -output "$app/Contents/Helpers/ClearlineTunnelAgent"
 # Swift's linker debug map still contains object-file paths after prefix maps.
-strip -S "$app/Contents/MacOS/Clearline" "$app/Contents/Helpers/ClearlineNetworkAgent"
+strip -S "$app/Contents/MacOS/Clearline" "$app/Contents/Helpers/ClearlineNetworkAgent" "$app/Contents/Helpers/ClearlineTunnelAgent"
 cp Resources/Info.plist "$app/Contents/Info.plist"
+rm -f "$app/Contents/Library/LaunchDaemons/org.clearline.tunnel.plist"
 swift scripts/make-icon.swift "$cache/icon.png"
 mkdir -p "$cache/AppIcon.iconset"
 for pixels in 16 32 64 128 256 512; do
@@ -52,7 +71,17 @@ python3 scripts/notices.py "$go_bin" "$app/Contents/Resources/ThirdPartyNotices.
 cp LICENSE "$app/Contents/Resources/LICENSE.txt"
 cp core/claude-domains.txt "$app/Contents/Resources/claude-domains.txt"
 cp core/ai-domains.txt "$app/Contents/Resources/ai-domains.txt"
-for executable in "$app/Contents/Helpers/clearline-core" "$app/Contents/Helpers/ClearlineNetworkAgent"; do codesign --force --sign - "$executable"; done
+codesign --force --identifier org.clearline.tunnel --sign - "$app/Contents/Helpers/ClearlineTunnelAgent"
+codesign --force --sign - "$app/Contents/Helpers/ClearlineNetworkAgent"
+payload="$(mktemp -d "$cache/tunnel-package-payload.XXXXXX")"
+mkdir -p "$payload/Library/PrivilegedHelperTools" "$payload/Library/LaunchDaemons"
+cp "$app/Contents/Helpers/ClearlineTunnelAgent" "$payload/Library/PrivilegedHelperTools/org.clearline.tunnel"
+cp "$tunnel_info" "$payload/Library/PrivilegedHelperTools/org.clearline.tunnel.version.plist"
+cp Resources/org.clearline.tunnel.plist "$payload/Library/LaunchDaemons/"
+chmod 755 "$payload/Library/PrivilegedHelperTools/org.clearline.tunnel"
+chmod 644 "$payload/Library/PrivilegedHelperTools/org.clearline.tunnel.version.plist" "$payload/Library/LaunchDaemons/org.clearline.tunnel.plist"
+pkgbuild --root "$payload" --ownership recommended --scripts scripts/tunnel-installer --identifier org.clearline.tunnel.pkg --version 0.3.0.3 "$app/Contents/Resources/ClearlineSystemTunnel.pkg" >/dev/null
+rm -rf "$payload"
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
 python3 - "$app" "$out/Clearline-macOS-universal.zip" <<'PYZIP'

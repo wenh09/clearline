@@ -1,8 +1,8 @@
 # 轻连 · Clearline
 
-macOS 上连接自有服务器的代理客户端。每位用户授权自己的 DigitalOcean 账号，优先选择并复用已有服务器和套餐，也可导入已有连接。日常一键连接，保留 **AI 分流 / 全部代理**、连接阶段、出口 IP 验证和网络测速。
+macOS 上连接自有服务器的客户端。每位用户授权自己的 DigitalOcean 账号，优先选择并复用已有服务器和套餐，也可导入已有连接。提供 **AI 分流 / 全局隧道**、连接阶段、出口 IP 验证和网络测速。
 
-**当前工作区为 0.3.0 的首次接入改造版（本机构建 2），尚未发布新的 GitHub Release。** 已发布的 v0.3.0 使用旧的新建向导；使用本文的新流程请运行 `./scripts/build.sh`，安装 `dist/Clearline.app`。服务器始终由各用户拥有和付费。
+**当前工作区为 0.3.0 的首次接入及 DNS/UDP 改造版（本机构建 3），尚未发布新的 GitHub Release。** 已发布的 v0.3.0 使用旧的新建向导和系统代理；使用本文的新流程请运行 `./scripts/build.sh`，安装 `dist/Clearline.app`。服务器始终由各用户拥有和付费。
 
 ## 安装与首次使用
 
@@ -29,12 +29,14 @@ AI 可以读取 `~/Library/Application Support/Clearline/setup-status.json`。Sc
 
 ## 连接范围
 
-- **AI 分流**：Claude、ChatGPT / OpenAI / Codex 及必要的登录、附件、静态资源域名走服务器；其他域名直连。清单见 [ai-domains.txt](core/ai-domains.txt)。
-- **全部代理**：所有进入 macOS HTTP / HTTPS / SOCKS 系统代理的 TCP 请求走服务器。
+- **AI 分流**：Claude、ChatGPT / OpenAI / Codex 及必要的登录、附件、静态资源域名走系统代理；其他域名直连。该模式不接管系统 DNS 或 WebRTC UDP，界面会明确提示。清单见 [ai-domains.txt](core/ai-domains.txt)。
+- **全局隧道**：通过 macOS utun 虚拟网卡接管公网 IPv4/IPv6 的 TCP 与 UDP，并将系统 DNS 指向隧道内解析器。DNS 只通过加密连接访问上游，不向本地运营商回退。局域网、回环及服务器入口保留直连，ICMP 不转发。Hysteria 2 服务端必须启用 UDP，入口当前要求可用的 IPv4 地址。
 
 域名按边界匹配，`chatgpt.com.evil.example` 不会命中 ChatGPT 规则。共享登录、验证主机按域名统一代理。隧道失败时，代理域名不会自动回退到本机直连。旧“仅 Claude”设置迁移为“AI 分流”。
 
-这是系统代理模式。不遵循系统代理的应用和任意应用的 UDP 流量需要其它接入方式。终端工具可从“工具”复制代理命令；临时端口在重新连接后可能变化。
+首次使用全局隧道时，从应用打开 `ClearlineSystemTunnel.pkg`，由电脑主人在 macOS 安装器中确认管理员权限，再返回连接。更新组件前先断开全局隧道。组件不接收连接密码，只管理虚拟网卡、DNS 与必要路由；它只接受当前构建中经过签名校验的内核。更换构建后需要更新配套组件。无需新增或升级服务器。
+
+AI 分流继续使用系统代理。终端工具可从“工具”复制代理命令；临时端口在重新连接后可能变化。旧“全部代理”设置保留为全局模式，只有组件成功接管后才显示已连接及 DNS/UDP 保护，不会悄悄降级为 TCP 代理。
 
 连接状态包含服务器连接、隧道验证、接入 Mac 的阶段与耗时。传输中断时会保留本地代理接入并尝试恢复，Mac 唤醒或网络变化后也会检查连接。主动断开、退出或整个本地代理进程结束时，恢复先前的系统代理；后续由其它软件修改的代理设置会保留。
 
@@ -56,7 +58,7 @@ DigitalOcean 登录使用 [官方公共客户端 OAuth + PKCE](https://docs.digi
 
 加密迁移文件使用 Argon2id 和 XChaCha20-Poly1305。配置密码单独传递。多台电脑同时使用 WireGuard 时需要各自独立身份。公开源码、安装包和发布记录不包含开发者个人服务器地址或连接凭据。GitHub 仓库所属账号仍由 GitHub 正常显示。
 
-系统代理的恢复记录位于 `~/Library/Application Support/Clearline/network-restore.plist`，权限为 `0600`。程序不安装常驻 root 服务，不修改 Mac 的 DNS 和系统路由。更新运行中的客户端前，请先验证备用联网连接；新版接管后再撤掉备用连接。
+系统代理恢复记录位于 `~/Library/Application Support/Clearline/network-restore.plist`，权限为 `0600`。全局隧道组件安装在 `/Library/PrivilegedHelperTools/org.clearline.tunnel`，通过系统 launchd 运行；它的 root 专用恢复记录为 `/var/run/org.clearline.tunnel.state`。组件在断开、内核退出或自身重启时恢复所管理的 DNS/路由，保留后来由其他软件修改的配置。传输暂时中断时保留隧道接管，DNS 不回退到本地。电脑主人可用 `sudo ./scripts/uninstall-tunnel.sh` 卸载组件；脚本在网络未恢复时停止卸载。更新运行中的客户端前先准备备用联网方式。
 
 ## 构建与验证
 
@@ -69,7 +71,7 @@ cd core
 go test -race ./...
 ```
 
-构建产物位于 `dist/`。构建脚本固定 Go 工具链与校验值，可用 `CLEARLINE_GO` 指定已有工具链；Go 依赖由 `go.mod` / `go.sum` 固定。构建过程映射本机源码路径，发行包需再执行隐私扫描。
+构建产物位于 `dist/`，应用内包含配套的网络组件安装包。构建脚本固定 Go 工具链与校验值，可用 `CLEARLINE_GO` 指定已有工具链；Go 依赖由 `go.mod` / `go.sum` 固定。组件的内核签名白名单封装在自身只读代码段，不从用户可修改的配置读取。构建过程映射本机源码路径，发行包需再执行隐私扫描。
 
 发行包采用本地签名，尚未使用 Developer ID 公证。目标 Mac 的 Gatekeeper 可能要求电脑主人确认打开，也可在目标 Mac 从源码构建。Intel 版本完成交叉编译，尚未完成实体设备验收。
 

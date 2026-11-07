@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+if [ -e /var/run/org.clearline.tunnel.state ]; then
+    client_pid=$(/usr/libexec/PlistBuddy -c 'Print clientPID' /var/run/org.clearline.tunnel.state 2>/dev/null || true)
+    case "$client_pid" in ''|*[!0-9]*) client_pid=0;; esac
+    if [ "$client_pid" -gt 0 ] && kill -0 "$client_pid" 2>/dev/null; then
+        echo '请先在 Clearline 中断开全局隧道，再更新网络组件。' >&2
+        exit 1
+    fi
+fi
+/bin/launchctl bootout system/org.clearline.tunnel >/dev/null 2>&1 || true
+exit 0

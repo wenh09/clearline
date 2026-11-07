@@ -10,17 +10,32 @@ import Combine
     enum RoutingMode: String, CaseIterable, Identifiable {
         case ai, all
         var id: String { rawValue }
-        var title: String { self == .ai ? "AI 分流" : "全部代理" }
-        var help: String { self == .ai ? "Claude、ChatGPT/OpenAI/Codex 及必要的登录、附件域名走美国服务器；其他域名直连。" : "遵循系统代理的流量走美国服务器。" }
+        var title: String { self == .ai ? "AI 分流" : "全局隧道" }
+        var help: String { self == .ai ? "AI 网站走系统代理，其他域名直连；不接管系统 DNS 和 WebRTC UDP。" : "公网 TCP、UDP 和系统 DNS 通过自己的服务器；首次使用需安装网络组件。" }
         static func restoring(_ stored: String?) -> Self { stored == "all" ? .all : .ai }
     }
     @Published private(set) var routingMode = RoutingMode.restoring(UserDefaults.standard.string(forKey: "routingMode"))
-    var routingCaption: String { routingMode == .ai ? "Claude / ChatGPT · 美国" : "全部代理 · 美国" }
+    var routingCaption: String { routingMode == .ai ? "Claude / ChatGPT · 美国" : "全局隧道 · 美国" }
+    @Published var needsTunnelApproval = false
+    @Published private(set) var packetTunnelActive = false
+    private let preparePacketTunnel: () throws -> Bool
+    private func prepareGlobalTunnel() -> Bool {
+        guard routingMode == .all else { return true }
+        do {
+            guard try preparePacketTunnel() else { needsTunnelApproval = true; return false }
+            return true
+        } catch { needsTunnelApproval = true; message = "请先通过 macOS 安装器安装本版本的系统隧道组件。"; return false }
+    }
+    func finishTunnelInstallation() {
+        needsTunnelApproval = false
+        if connected { setRoutingMode(.all) } else { connect() }
+    }
 
     func setRoutingMode(_ mode: RoutingMode) {
         guard mode != routingMode, !busy, !loadingProfiles else { return }
         let previous = routingMode
         routingMode = mode; UserDefaults.standard.set(mode.rawValue, forKey: "routingMode")
+        if connected && !prepareGlobalTunnel() { routingMode = previous; UserDefaults.standard.set(previous.rawValue, forKey: "routingMode"); return }
         guard connected, let profile = selected else { return }
         // Retire callbacks from the old session before restoring its proxy.
         // If restoration fails, retain both the live tunnel and its old scope.
@@ -276,7 +291,7 @@ import Combine
     var busy: Bool { checkingPreflight || [.connecting, .reconnecting, .disconnecting].contains(state) }
     var connected: Bool { state == .connected }
     var backupURL: URL { recoveryFile }
-    var recoveryNeeded: Bool { FileManager.default.fileExists(atPath: backupURL.path) && !connected }
+    var recoveryNeeded: Bool { (FileManager.default.fileExists(atPath: backupURL.path) || FileManager.default.fileExists(atPath: TunnelNetwork.journalPath)) && !connected }
 
     init(configurationLoader: @escaping (Bool) throws -> [Profile] = { try KeychainStore.load(interactionAllowed: $0) },
          coreExecutable: URL = CoreRPC.coreURL,
@@ -288,7 +303,9 @@ import Combine
          assistantStatus: AssistantStatusStore? = nil,
          preflight: @escaping (Profile, Int?, Bool) async -> NetworkPreflight = NetworkPreflight.inspect,
          saveProfiles: @escaping ([Profile]) throws -> Void = KeychainStore.save,
-         validateProfile: ((Profile) async throws -> Void)? = nil) {
+         validateProfile: ((Profile) async throws -> Void)? = nil,
+         preparePacketTunnel: @escaping () throws -> Bool = TunnelService.prepare) {
+        self.preparePacketTunnel = preparePacketTunnel
         self.assistantStatus = assistantStatus ?? .shared
         self.preflightInspector = preflight; self.profileSaver = saveProfiles
         self.profileValidator = validateProfile ?? { profile in _ = try await CoreRPC.call("validate", ["profile": CoreRPC.dictionary(profile)]) }
@@ -390,6 +407,7 @@ import Combine
     func cancelNetworkCheck() { showNetworkCheck = false; networkPreflight = nil }
     private func startConnection() {
         guard let profile = selected else { return }
+        guard prepareGlobalTunnel() else { return }
         wantsConnection = true; backoff.reset(); waitingForNetwork = false
         session = UUID(); let token = session
         startProgress(.connect, phase: core != nil || recoveryNeeded ? .restoring : .server)
@@ -406,7 +424,7 @@ import Combine
     }
     private func begin(_ profile: Profile) {
         clearExitVerification(); clearSpeedTest(); networkCheckTask?.cancel()
-        coreSupportsRetention = false; transportReady = false; proxyApplied = false; proxyRetainedDuringRecovery = false
+        coreSupportsRetention = false; transportReady = false; proxyApplied = false; proxyRetainedDuringRecovery = false; packetTunnelActive = false
         advanceProgress(.server); retryUntil = nil
         session = UUID(); let token = session
         state = backoff.attempts > 0 ? .reconnecting : .connecting; message = "正在验证加密连接…"
@@ -421,7 +439,7 @@ import Combine
             if self.reconnect && self.lastFailureRetryable { self.scheduleReconnect() } else { self.fail(self.statusNote ?? "连接已中断，请检查服务器和网络。") }
         }
         do {
-            try child.start(); try child.send(["profile": CoreRPC.dictionary(profile), "alternatives": CoreRPC.dictionary(profiles.filter { $0.id != profile.id }), "preferredID": preferredProfileID ?? "", "routingMode": routingMode.rawValue, "proxyDomains": Self.defaultDomains.components(separatedBy: .newlines)])
+            try child.start(); try child.send(["profile": CoreRPC.dictionary(profile), "alternatives": CoreRPC.dictionary(profiles.filter { $0.id != profile.id }), "preferredID": preferredProfileID ?? "", "routingMode": routingMode.rawValue, "proxyDomains": Self.defaultDomains.components(separatedBy: .newlines), "packetTunnel": routingMode == .all])
             log("开始连接 · " + profile.protocolName)
             armConnectTimeout(token)
         } catch { fail("连接内核启动失败：" + error.localizedDescription) }
@@ -458,6 +476,8 @@ import Combine
             latency = event["latencyMs"] as? Int; lastHealthAt = Date(); retryUntil = nil; statusNote = nil
             if proxyApplied { finishReadyConnection() } else { advanceProgress(.applying) }
         case "ready":
+            packetTunnelActive = event["packetTunnel"] as? Bool == true
+            guard routingMode != .all || packetTunnelActive else { fail("系统隧道未接管 DNS/UDP，已停止连接以避免误报保护状态。"); return }
             armConnectTimeout(token)
             transportReady = true
             if event["retainsProxy"] as? Bool == true { coreSupportsRetention = true }
@@ -474,7 +494,7 @@ import Combine
         case "exitVerification": receiveExitVerification(event)
         case "stats": upload = (event["uploadBytes"] as? NSNumber)?.int64Value ?? 0; download = (event["downloadBytes"] as? NSNumber)?.int64Value ?? 0
         case "health":
-            if event["ok"] as? Bool == true { latency = event["latencyMs"] as? Int; lastHealthAt = Date(); statusNote = nil; message = "浏览器与遵循系统代理的应用已接入" }
+            if event["ok"] as? Bool == true { latency = event["latencyMs"] as? Int; lastHealthAt = Date(); statusNote = nil; message = packetTunnelActive ? "全局隧道已接入，DNS 和 UDP 经服务器转发" : "浏览器与遵循系统代理的应用已接入" }
             else { latency = nil; statusNote = "网络检查未响应，正在复查"; message = "连接响应异常，正在检查…"; log("健康检查暂未通过") }
         case "error":
             lastFailureRetryable = event["retryable"] as? Bool ?? true
@@ -490,7 +510,7 @@ import Combine
         finishProgress(); connectMs = connectionProgress.map { Int($0.elapsed(at: operationNow) * 1000) }
         state = .connected; connectedAt = Date(); backoff.reset(); statusNote = nil; retryUntil = nil
         networkPreflight = nil
-        message = "浏览器与遵循系统代理的应用已接入"; connectTimeout?.cancel()
+        message = packetTunnelActive ? "全局隧道已接入，DNS 和 UDP 经服务器转发" : "浏览器与遵循系统代理的应用已接入"; connectTimeout?.cancel()
         if verifyAfterSetup { verifyAfterSetup = false; verifyExit() }
     }
     private func makeAgent() -> JSONChild { JSONChild(executable: agentExecutable, arguments: []) }
@@ -546,13 +566,15 @@ import Combine
         }
         if let old = core {
             old.stop()
-            for _ in 0..<30 {
+            for _ in 0..<180 {
                 if !old.process.isRunning { break }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
             guard !old.process.isRunning else { message = "旧连接仍在退出，请稍后重试"; return false }
         }
         core = nil; httpPort = nil; connectedAt = nil
+        packetTunnelActive = false
+        guard !FileManager.default.fileExists(atPath: TunnelNetwork.journalPath) else { message = "系统隧道恢复未完成，请从工具菜单恢复网络。"; return false }
         proxyApplied = false; transportReady = false; coreSupportsRetention = false; proxyRetainedDuringRecovery = false
         return true
     }
@@ -606,6 +628,16 @@ import Combine
     }
     func recover() {
         guard !connected, !busy else { return }
+        if FileManager.default.fileExists(atPath: TunnelNetwork.journalPath) {
+            do { guard try preparePacketTunnel() else { needsTunnelApproval = true; return } }
+            catch { needsTunnelApproval = true; return }
+            state = .disconnecting
+            Task {
+                do { _ = try await CoreRPC.call("recoverTunnel", [:]); state = .idle; recover() }
+                catch { state = .failed; message = "系统隧道恢复未完成，请检查后台服务权限后重试。" }
+            }
+            return
+        }
         let child = makeAgent(); agent = child
         child.onEvent = { [weak self] event in
             guard let self else { return }; self.message = event["event"] as? String == "restored" ? "原有网络设置已恢复" : (event["message"] as? String ?? "恢复失败")
@@ -652,10 +684,10 @@ import Combine
     private func writeAssistantStatus() {
         let country = exitVerification?.country
         let safeCountry = country?.range(of: "^[A-Z]{2}$", options: .regularExpression) != nil ? country : nil
-        let error: String? = storageError ? "storage_locked" : state == .failed ? "connection_failed" : showNetworkCheck ? "proxy_conflict" : exitError != nil ? "exit_verification_failed" : nil
+        let error: String? = needsTunnelApproval ? "tunnel_approval" : storageError ? "storage_locked" : state == .failed ? "connection_failed" : showNetworkCheck ? "proxy_conflict" : exitError != nil ? "exit_verification_failed" : nil
         let code: String
         if checkingPreflight { code = "checking_network" }
         else { switch state { case .idle: code = "idle"; case .connecting: code = "connecting"; case .connected: code = "connected"; case .reconnecting: code = "reconnecting"; case .disconnecting: code = "disconnecting"; case .failed: code = "failed" } }
-        assistantStatus.updateConnection(.init(loaded: !loadingProfiles && !storageError, profileCount: profiles.count, state: code, routingMode: routingMode.rawValue, phase: connectionProgress?.phase.rawValue, connected: connected, busy: busy, storageLocked: storageError, exitVerified: connected && exitVerification != nil, exitCountry: connected ? safeCountry : nil, networkConflict: networkPreflight?.requiresAcknowledgement == true, errorCode: error))
+        assistantStatus.updateConnection(.init(loaded: !loadingProfiles && !storageError, profileCount: profiles.count, state: code, routingMode: routingMode.rawValue, phase: connectionProgress?.phase.rawValue, connected: connected, busy: busy, storageLocked: storageError, exitVerified: connected && exitVerification != nil, exitCountry: connected ? safeCountry : nil, networkConflict: networkPreflight?.requiresAcknowledgement == true, errorCode: error, packetTunnelActive: packetTunnelActive, dnsProtected: connected && packetTunnelActive, udpProtected: connected && packetTunnelActive))
     }
 }

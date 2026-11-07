@@ -18,6 +18,9 @@ import Foundation
         var exitCountry: String?
         var networkConflict: Bool
         var errorCode: String?
+        var packetTunnelActive = false
+        var dnsProtected = false
+        var udpProtected = false
     }
     struct Cloud: Codable, Equatable {
         var active: Bool
@@ -34,7 +37,7 @@ import Foundation
     struct Document: Encodable {
         let schemaVersion = 2
         let version = "0.3.0"
-        let build = "2"
+        let build = "3"
         let updatedAt: String
         let connectionSaved: Bool?
         let connected: Bool

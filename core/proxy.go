@@ -260,7 +260,8 @@ func (p *Proxy) handleSOCKS(c net.Conn) {
 	if _, e = io.ReadFull(b, header); e != nil || header[0] != 5 || header[2] != 0 {
 		return
 	}
-	if header[1] != 1 {
+	packetMode := header[1] == workerUDPCommand && p.internalToken != ""
+	if header[1] != 1 && !packetMode {
 		c.Write([]byte{5, 7, 0, 1, 0, 0, 0, 0, 0, 0})
 		return
 	}
@@ -300,7 +301,12 @@ func (p *Proxy) handleSOCKS(c net.Conn) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-	up, e := p.dial(ctx, net.JoinHostPort(host, strconv.Itoa(int(port))))
+	var up net.Conn
+	if packetMode {
+		up, e = p.tunnel.DialContext(ctx, "udp", net.JoinHostPort(host, strconv.Itoa(int(port))))
+	} else {
+		up, e = p.dial(ctx, net.JoinHostPort(host, strconv.Itoa(int(port))))
+	}
 	cancel()
 	if e != nil {
 		c.Write([]byte{5, 4, 0, 1, 0, 0, 0, 0, 0, 0})
@@ -311,5 +317,16 @@ func (p *Proxy) handleSOCKS(c net.Conn) {
 		return
 	}
 	c.SetDeadline(time.Time{})
+	if packetMode {
+		relayDatagrams(&datagramStream{Conn: &bufferedConn{Conn: c, reader: b}}, up)
+		return
+	}
 	p.bridge(c, b, up)
 }
+
+type bufferedConn struct {
+	net.Conn
+	reader io.Reader
+}
+
+func (c *bufferedConn) Read(b []byte) (int, error) { return c.reader.Read(b) }

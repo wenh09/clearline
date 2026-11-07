@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+/bin/launchctl enable system/org.clearline.tunnel
+/bin/launchctl bootstrap system /Library/LaunchDaemons/org.clearline.tunnel.plist
+exit 0

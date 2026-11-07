@@ -28,6 +28,7 @@ type Request struct {
 	Password      string    `json:"password"`
 	Data          string    `json:"data"`
 	InternalToken string    `json:"internalToken,omitempty"`
+	PacketTunnel  bool      `json:"packetTunnel,omitempty"`
 }
 
 var outMu sync.Mutex
@@ -138,6 +139,16 @@ func runTransport(r Request, input *bufio.Reader) error {
 		return e
 	}
 	t, lat := connected.tunnel, connected.latency
+	if r.PacketTunnel {
+		check, cancel := context.WithTimeout(lifeCtx, 5*time.Second)
+		packet, err := t.DialContext(check, "udp", "1.1.1.1:53")
+		cancel()
+		if err != nil {
+			t.Close()
+			return connectionError{message: "服务器未启用 UDP，无法建立全局隧道"}
+		}
+		packet.Close()
+	}
 	onChecking()
 	var audit func(string, string)
 	if r.AuditRoutes {
@@ -321,6 +332,13 @@ func main() {
 		os.Exit(1)
 	}
 	switch os.Args[1] {
+	case "recoverTunnel":
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		e = recoverPacketTunnel(ctx)
+		cancel()
+		if e == nil {
+			emit(map[string]any{"event": "restored"})
+		}
 	case "run":
 		e = run(r, input)
 	case "transport":
