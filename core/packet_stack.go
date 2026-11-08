@@ -45,6 +45,7 @@ type packetStack struct {
 	cancel      context.CancelFunc
 	connections sync.Map
 	slots       chan struct{}
+	dnsSlots    chan struct{}
 	once        sync.Once
 	up, down    atomic.Int64
 	failureLock sync.Mutex
@@ -75,7 +76,7 @@ func (p *packetStack) deviceError() error {
 
 func newPacketStack(parent context.Context, device packetDevice, tunnel Tunnel, routing ...*packetRouting) (*packetStack, error) {
 	ctx, cancel := context.WithCancel(parent)
-	p := &packetStack{device: device, tunnel: tunnel, ctx: ctx, cancel: cancel, slots: make(chan struct{}, 1024)}
+	p := &packetStack{device: device, tunnel: tunnel, ctx: ctx, cancel: cancel, slots: make(chan struct{}, 1024), dnsSlots: make(chan struct{}, maxConcurrentDNSQueries)}
 	if len(routing) > 0 {
 		p.routing = routing[0]
 	}
@@ -305,78 +306,130 @@ func dnsThroughServers(ctx context.Context, t Tunnel, query []byte, servers []st
 	}
 	return nil, errors.New("隧道 DNS 暂不可用")
 }
+
+const maxDNSQueriesPerSocket = 16
+const maxConcurrentDNSQueries = 128
+
+func (p *packetStack) dnsReply(parent context.Context, query []byte, truncate bool) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	var reply []byte
+	var e error
+	if p.routing != nil {
+		reply, e = p.routing.dns(ctx, p.tunnel, query)
+	} else {
+		reply, e = dnsThroughTunnel(ctx, p.tunnel, query)
+	}
+	if e != nil {
+		var parser dnsmessage.Parser
+		header, err := parser.Start(query)
+		if err != nil {
+			return nil, err
+		}
+		questions, err := parser.AllQuestions()
+		if err != nil {
+			return nil, err
+		}
+		builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: header.ID, Response: true, RecursionDesired: header.RecursionDesired, RCode: dnsmessage.RCodeServerFailure})
+		builder.StartQuestions()
+		for _, question := range questions {
+			builder.Question(question)
+		}
+		reply, err = builder.Finish()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if truncate && len(reply) > 512 {
+		var parser dnsmessage.Parser
+		header, err := parser.Start(reply)
+		if err != nil {
+			return nil, err
+		}
+		questions, err := parser.AllQuestions()
+		if err != nil {
+			return nil, err
+		}
+		header.Truncated = true
+		builder := dnsmessage.NewBuilder(nil, header)
+		builder.StartQuestions()
+		for _, question := range questions {
+			builder.Question(question)
+		}
+		reply, err = builder.Finish()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return reply, nil
+}
 func (p *packetStack) serveDNS(c net.Conn, network string) {
+	if network == "udp" {
+		p.serveUDPDNS(c)
+		return
+	}
+	for {
+		c.SetReadDeadline(time.Now().Add(30 * time.Second))
+		query, err := readDatagram(c)
+		if err != nil {
+			return
+		}
+		reply, err := p.dnsReply(p.ctx, query, false)
+		if err != nil {
+			return
+		}
+		if writeDatagram(c, reply) != nil {
+			return
+		}
+	}
+}
+func (p *packetStack) serveUDPDNS(c net.Conn) {
+	// macOS can multiplex a page's A/AAAA/HTTPS lookups on one UDP socket.
+	// Waiting for each remote reply here serializes every cross-ocean round trip.
+	// Bound concurrency per socket and across the stack, without changing the
+	// resolver, routing policy, transaction IDs, truncation or failure replies.
+	ctx, cancel := context.WithCancel(p.ctx)
+	var pending sync.WaitGroup
+	var writeLock sync.Mutex
+	defer func() { cancel(); c.Close(); pending.Wait() }()
+	slots := make(chan struct{}, maxDNSQueriesPerSocket)
 	buf := make([]byte, 65535)
 	for {
 		c.SetReadDeadline(time.Now().Add(30 * time.Second))
-		var query []byte
-		var e error
-		if network == "tcp" {
-			query, e = readDatagram(c)
-		} else {
-			var n int
-			n, e = c.Read(buf)
-			query = append([]byte(nil), buf[:n]...)
-		}
-		if e != nil {
+		n, err := c.Read(buf)
+		if err != nil {
 			return
 		}
-		ctx, cancel := context.WithTimeout(p.ctx, 10*time.Second)
-		var reply []byte
-		if p.routing != nil {
-			reply, e = p.routing.dns(ctx, p.tunnel, query)
-		} else {
-			reply, e = dnsThroughTunnel(ctx, p.tunnel, query)
-		}
-		cancel()
-		if e != nil {
-			var parser dnsmessage.Parser
-			header, err := parser.Start(query)
-			if err != nil {
-				return
-			}
-			questions, err := parser.AllQuestions()
-			if err != nil {
-				return
-			}
-			builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: header.ID, Response: true, RecursionDesired: header.RecursionDesired, RCode: dnsmessage.RCodeServerFailure})
-			builder.StartQuestions()
-			for _, question := range questions {
-				builder.Question(question)
-			}
-			reply, err = builder.Finish()
-			if err != nil {
-				return
-			}
-		}
-		if network == "udp" && len(reply) > 512 {
-			var parser dnsmessage.Parser
-			header, err := parser.Start(reply)
-			if err != nil {
-				return
-			}
-			questions, err := parser.AllQuestions()
-			if err != nil {
-				return
-			}
-			header.Truncated = true
-			builder := dnsmessage.NewBuilder(nil, header)
-			builder.StartQuestions()
-			for _, question := range questions {
-				builder.Question(question)
-			}
-			reply, err = builder.Finish()
-			if err != nil {
-				return
-			}
-		}
-		if network == "tcp" {
-			e = writeDatagram(c, reply)
-		} else {
-			_, e = c.Write(reply)
-		}
-		if e != nil {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
 			return
 		}
+		select {
+		case p.dnsSlots <- struct{}{}:
+		case <-ctx.Done():
+			<-slots
+			return
+		}
+		query := append([]byte(nil), buf[:n]...)
+		pending.Add(1)
+		go func() {
+			defer pending.Done()
+			defer func() { <-p.dnsSlots; <-slots }()
+			reply, err := p.dnsReply(ctx, query, true)
+			if err != nil || ctx.Err() != nil {
+				return
+			}
+			// Keep datagram framing atomic even for stream-backed test connections.
+			writeLock.Lock()
+			defer writeLock.Unlock()
+			if ctx.Err() != nil {
+				return
+			}
+			if _, err = c.Write(reply); err != nil {
+				cancel()
+				c.Close()
+			}
+		}()
 	}
 }

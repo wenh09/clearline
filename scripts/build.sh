@@ -82,7 +82,7 @@ cp "$tunnel_info" "$payload/Library/PrivilegedHelperTools/org.clearline.tunnel.v
 cp Resources/org.clearline.tunnel.plist "$payload/Library/LaunchDaemons/"
 chmod 755 "$payload/Library/PrivilegedHelperTools/org.clearline.tunnel"
 chmod 644 "$payload/Library/PrivilegedHelperTools/org.clearline.tunnel.version.plist" "$payload/Library/LaunchDaemons/org.clearline.tunnel.plist"
-pkgbuild --root "$payload" --ownership recommended --scripts scripts/tunnel-installer --identifier org.clearline.tunnel.pkg --version 0.3.0.9 "$app/Contents/Resources/ClearlineSystemTunnel.pkg" >/dev/null
+pkgbuild --root "$payload" --ownership recommended --scripts scripts/tunnel-installer --identifier org.clearline.tunnel.pkg --version 0.3.0.10 "$app/Contents/Resources/ClearlineSystemTunnel.pkg" >/dev/null
 rm -rf "$payload"
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
@@ -102,7 +102,7 @@ for component in components:
     component['BundleIsRelocatable'] = False
 with open(sys.argv[1], 'wb') as f: plistlib.dump(components, f)
 PYCOMP
-pkgbuild --root "$app_payload" --component-plist "$installer_parts/components.plist" --ownership recommended --scripts "$installer_parts/scripts" --identifier org.clearline.client.pkg --version 0.3.0.8 "$installer_parts/ClearlineApplication.pkg" >/dev/null
+pkgbuild --root "$app_payload" --component-plist "$installer_parts/components.plist" --ownership recommended --scripts "$installer_parts/scripts" --identifier org.clearline.client.pkg --version 0.3.0.10 "$installer_parts/ClearlineApplication.pkg" >/dev/null
 cp "$app/Contents/Resources/ClearlineSystemTunnel.pkg" "$installer_parts/"
 productbuild --synthesize --product Resources/InstallerRequirements.plist --package "$installer_parts/ClearlineApplication.pkg" --package "$installer_parts/ClearlineSystemTunnel.pkg" "$installer_parts/distribution.xml" >/dev/null
 python3 - "$installer_parts/distribution.xml" <<'PYTITLE'
