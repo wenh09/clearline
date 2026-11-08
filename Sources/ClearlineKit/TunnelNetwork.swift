@@ -107,6 +107,16 @@ public final class TunnelNetwork {
         _ = try run(["/sbin/ifconfig", interface, "inet", "192.0.2.253", Self.probeAddress, "mtu", "1280", "up"])
         _ = try run(["/sbin/ifconfig", interface, "inet6", "fd7a:115c:a1e0:ffff::1", "prefixlen", "126", "alias"])
     }
+    private func verifyEntry(_ endpoint: String) throws {
+        let route = fields(try run(["/sbin/route", "-n", "get", endpoint]))
+        guard let interface = route["interface"], interface.range(of: "^(en|bridge|bond)[0-9]+$", options: .regularExpression) != nil else {
+            throw TunnelNetworkFailure("服务器入口被全局路由接管，已停止以避免隧道循环")
+        }
+    }
+    private func persistentBypass(_ route: [String: String]) -> Bool {
+        let flags = route["flags"] ?? ""
+        return flags.contains("STATIC") && !flags.contains("WASCLONED") && !flags.contains("IFSCOPE")
+    }
     public func install(interface: String, endpoint: String, uid: UInt32, clientPID: Int32? = nil) throws {
         lock.lock(); defer { lock.unlock() }
         guard interface.range(of: "^utun[0-9]+$", options: .regularExpression) != nil, Self.validIPv4(endpoint) else { throw TunnelNetworkFailure("系统隧道参数无效") }
@@ -117,9 +127,16 @@ public final class TunnelNetwork {
         try store(journal) // Durable intent before the first mutation.
         do {
             let before = fields(try run(["/sbin/route", "-n", "get", endpoint]))
-            if before["destination"] == endpoint {
+            let flags = before["flags"] ?? ""
+            let temporaryOrScoped = flags.contains("WASCLONED") || flags.contains("IFSCOPE")
+            if before["destination"] == endpoint, let iface = before["interface"], iface.range(of: "^(en|bridge|bond)[0-9]+$", options: .regularExpression) == nil {
+                throw TunnelNetworkFailure("服务器入口仍经过其他 VPN")
+            }
+            if before["destination"] == endpoint && !temporaryOrScoped {
                 guard let iface = before["interface"], !iface.hasPrefix("utun") else { throw TunnelNetworkFailure("服务器入口仍经过其他 VPN") }
             } else {
+                // A route-get cache entry is not a persistent, unscoped bypass.
+                // Installing broader TUN routes can invalidate those clones.
                 journal.ownsServerRoute = true; try store(journal)
                 _ = try run(["/sbin/route", "-n", "add", "-host", endpoint, entryGateway])
             }
@@ -129,6 +146,7 @@ public final class TunnelNetwork {
                 journal.routes.append(prefix); try store(journal)
                 _ = try run(["/sbin/route", "-n", "add", prefix.contains(":") ? "-inet6" : "-inet", prefix, "-interface", interface])
             }
+            try verifyEntry(endpoint)
             for snapshot in journal.dns { _ = try run(["/usr/sbin/networksetup", "-setdnsservers", snapshot.service, Self.dnsAddress]) }
             flush()
         } catch { try? restore(); throw error }
@@ -139,10 +157,11 @@ public final class TunnelNetwork {
         for snapshot in journal.dns {
             guard try dns(snapshot.service) == [Self.dnsAddress] else { throw TunnelNetworkFailure("DNS 设置已被其他软件修改，请重新连接") }
         }
+        try verifyEntry(journal.endpoint)
         guard journal.ownsServerRoute, let current = try? gateway() else { return }
         guard current != journal.gateways.last else { return }
         let route = fields(try run(["/sbin/route", "-n", "get", journal.endpoint]))
-        let stillOwned = route["destination"] == journal.endpoint && journal.gateways.contains(route["gateway"] ?? "")
+        let stillOwned = route["destination"] == journal.endpoint && journal.gateways.contains(route["gateway"] ?? "") && persistentBypass(route)
         guard stillOwned || route["destination"] != journal.endpoint else { throw TunnelNetworkFailure("服务器入口路由已改变，请重新连接") }
         journal.gateways.append(current); try store(journal)
         _ = try run(["/sbin/route", "-n", stillOwned ? "change" : "add", "-host", journal.endpoint, current])
@@ -175,7 +194,7 @@ public final class TunnelNetwork {
         }
         if journal.ownsServerRoute {
             let route = (try? run(["/sbin/route", "-n", "get", journal.endpoint])).map(fields) ?? [:]
-            if route["destination"] == journal.endpoint, journal.gateways.contains(route["gateway"] ?? "") { _ = try run(["/sbin/route", "-n", "delete", "-host", journal.endpoint]) }
+            if route["destination"] == journal.endpoint, journal.gateways.contains(route["gateway"] ?? ""), persistentBypass(route) { _ = try run(["/sbin/route", "-n", "delete", "-host", journal.endpoint]) }
         }
         flush(); try FileManager.default.removeItem(at: journalURL); active = nil
     }

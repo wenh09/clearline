@@ -8,6 +8,7 @@ final class TunnelNetworkTests: XCTestCase {
         var mutations: [[String]] = []
         var failPrefix: String?
         var gateway = "192.0.2.1"
+        var clonedEntry = false
         func command(_ args: [String]) throws -> String {
             if args.contains("-listnetworkserviceorder") { return "(1) Wi-Fi\n(Hardware Port: Wi-Fi, Device: en1)\n(2) Ethernet\n(Hardware Port: Ethernet, Device: en0)\n(3) Other VPN\n(Hardware Port: VPN, Device: )\n" }
             if args.contains("-getdnsservers") { let name = args.last!; return dns[name, default: []].isEmpty ? "There aren't any DNS Servers set on \(name).\n" : dns[name]!.joined(separator: "\n") }
@@ -16,11 +17,16 @@ final class TunnelNetworkTests: XCTestCase {
                 let action = args[2]
                 let key = args[3] == "-host" || args[3] == "-inet" || args[3] == "-inet6" ? args[4] : args[3]
                 if action == "get" {
-                    if let route = routes[key] { return "destination: \(key)\ninterface: \(route.0)\ngateway: \(route.1)\n" }
+                    if let route = routes[key] {
+                        let flags = clonedEntry && key == "198.51.100.1" ? "<UP,GATEWAY,HOST,WASCLONED,IFSCOPE>" : "<UP,GATEWAY,HOST,STATIC>"
+                        return "destination: \(key)\ninterface: \(route.0)\ngateway: \(route.1)\nflags: \(flags)\n"
+                    }
                     return "destination: default\ninterface: en1\ngateway: \(gateway)\n"
                 }
                 if key == failPrefix { failPrefix = nil; throw TunnelNetworkFailure("fixture failure") }
                 mutations.append(args)
+                if action == "add", key == "0.0.0.0/1", clonedEntry { routes["198.51.100.1"] = nil; clonedEntry = false }
+                if (action == "add" || action == "change"), key == "198.51.100.1" { clonedEntry = false }
                 if action == "delete" { routes[key] = nil }
                 else { routes[key] = args.contains("-interface") ? (args.last!, "") : ("en1", args.last!) }
                 return ""
@@ -29,6 +35,23 @@ final class TunnelNetworkTests: XCTestCase {
         }
     }
     private func journal() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent("Clearline-network-test-" + UUID().uuidString) }
+    func testClonedScopedHostCacheDoesNotReplacePersistentEntryBypass() throws {
+        let path = journal(); defer { try? FileManager.default.removeItem(at: path) }
+        let fake = FakeNetwork(); fake.clonedEntry = true; fake.routes["198.51.100.1"] = ("en1", "192.0.2.1")
+        let network = TunnelNetwork(journalURL: path, command: fake.command)
+        try network.install(interface: "utun42", endpoint: "198.51.100.1", uid: 501)
+        XCTAssertEqual(fake.routes["198.51.100.1"]?.0, "en1")
+        XCTAssertTrue(fake.mutations.contains { $0.prefix(4) == ["/sbin/route", "-n", "add", "-host"] })
+        try network.restore(owner: 501)
+        XCTAssertTrue(fake.routes.isEmpty)
+    }
+    func testFailedBypassAddDoesNotDeleteExistingScopedCache() throws {
+        let path = journal(); defer { try? FileManager.default.removeItem(at: path) }
+        let fake = FakeNetwork(); fake.clonedEntry = true; fake.routes["198.51.100.1"] = ("en1", "192.0.2.1"); fake.failPrefix = "198.51.100.1"
+        XCTAssertThrowsError(try TunnelNetwork(journalURL: path, command: fake.command).install(interface: "utun42", endpoint: "198.51.100.1", uid: 501))
+        XCTAssertEqual(fake.routes["198.51.100.1"]?.0, "en1"); XCTAssertTrue(fake.clonedEntry)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+    }
     func testProbeOnlyConfiguresTemporaryDeviceWithoutChangingDNSOrDefaultRoutes() throws {
         let path = journal(); let fake = FakeNetwork(); let original = fake.dns
         try TunnelNetwork(journalURL: path, command: fake.command).configureProbe(interface: "utun42")
