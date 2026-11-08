@@ -73,7 +73,7 @@ import Darwin
         }
         for path in [core, agent] { try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path.path) }
         // These fixtures neither read Keychain nor touch system network settings.
-        let model = AppModel(configurationLoader: { _ in [Profile(id: "fixture", name: "test", kind: "hysteria2", config: "hy2://fixture@127.0.0.1")] }, coreExecutable: core, agentExecutable: agent, recoveryFile: folder.appendingPathComponent("network.plist"), monitorSystemEvents: monitorSystemEvents, reconnectPause: pause, connectionCheckPause: 10_000_000, assistantStatus: AssistantStatusStore(), preflight: preflight, preparePacketTunnel: prepare, proxyInspector: { _ in true })
+        let model = AppModel(configurationLoader: { _ in [Profile(id: "fixture", name: "test", kind: "hysteria2", config: "hy2://fixture@127.0.0.1")] }, coreExecutable: core, agentExecutable: agent, recoveryFile: folder.appendingPathComponent("network.plist"), monitorSystemEvents: monitorSystemEvents, reconnectPause: pause, connectionCheckPause: 10_000_000, assistantStatus: AssistantStatusStore(), preflight: preflight, preparePacketTunnel: prepare, proxyInspector: { _ in true }, tunnelRecoveryPending: { false })
         return (model, folder)
     }
     private func count(_ folder: URL) -> Int {

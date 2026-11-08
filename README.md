@@ -36,6 +36,8 @@ AI 可以读取 `~/Library/Application Support/Clearline/setup-status.json`。Sc
 
 AI 模式的 DNS 统一经加密隧道从服务器查询；给 AI 域名分配内部地址，保留域名到 TCP/UDP 的关联。普通域名也从隧道解析，只将其 IPv4 网页连接直连。常见加密 DNS 域名、字面解析器地址和 DNS-over-TLS 端口也经过服务器。域名清单见 [ai-domains.txt](core/ai-domains.txt)，只匹配完整域名及其子域，不匹配相似后缀。局域网、回环和服务器入口保留直连，ICMP 不转发。
 
+macOS 网络组件同时保留 TUN 路由和物理网卡的 scoped IPv4 路由，让普通网页的接口绑定连接可直连，避免 AI 接管后出现“网络不可达”。安装和网关变化时会核对这条直连路径；断开时只撤销组件自己标记的路由，保留已有或后来被其他软件替换的配置。
+
 内部地址映射仅存本机 `~/Library/Application Support/Clearline/dns-map-v1.json`（0600），跨重连保留以免浏览器缓存指向错误域名，不含密码、令牌或浏览 URL，不上传。未知的旧内部地址拒绝连接。AI DNS 和 IPv6 不向本地回退；传输中断时保留隧道接管并重试。
 
 AI 模式需要匹配的网络组件，服务端必须支持 UDP，入口当前要求可用 IPv4。完整安装包同时更新客户端和组件。ZIP 方式可从应用打开配套 `ClearlineSystemTunnel.pkg`，由电脑主人完成 macOS 管理员认证。组件不接收连接密码，只管理虚拟网卡、DNS 和必要路由，只接受构建中封装的精确内核签名。无需新增或升级服务器。

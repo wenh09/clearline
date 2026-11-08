@@ -82,7 +82,7 @@ cp "$tunnel_info" "$payload/Library/PrivilegedHelperTools/org.clearline.tunnel.v
 cp Resources/org.clearline.tunnel.plist "$payload/Library/LaunchDaemons/"
 chmod 755 "$payload/Library/PrivilegedHelperTools/org.clearline.tunnel"
 chmod 644 "$payload/Library/PrivilegedHelperTools/org.clearline.tunnel.version.plist" "$payload/Library/LaunchDaemons/org.clearline.tunnel.plist"
-pkgbuild --root "$payload" --ownership recommended --scripts scripts/tunnel-installer --identifier org.clearline.tunnel.pkg --version 0.3.0.8 "$app/Contents/Resources/ClearlineSystemTunnel.pkg" >/dev/null
+pkgbuild --root "$payload" --ownership recommended --scripts scripts/tunnel-installer --identifier org.clearline.tunnel.pkg --version 0.3.0.9 "$app/Contents/Resources/ClearlineSystemTunnel.pkg" >/dev/null
 rm -rf "$payload"
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"

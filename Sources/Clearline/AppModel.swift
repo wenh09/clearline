@@ -351,7 +351,8 @@ import Combine
     var busy: Bool { checkingPreflight || [.connecting, .reconnecting, .disconnecting].contains(state) }
     var connected: Bool { state == .connected }
     var backupURL: URL { recoveryFile }
-    private var hasTunnelRecoveryRecord: Bool { [TunnelNetwork.journalPath, TunnelNetwork.legacyJournalPath].contains { FileManager.default.fileExists(atPath: $0) } }
+    private let tunnelRecoveryPending: () -> Bool
+    private var hasTunnelRecoveryRecord: Bool { tunnelRecoveryPending() }
     var recoveryNeeded: Bool { (FileManager.default.fileExists(atPath: backupURL.path) || hasTunnelRecoveryRecord) && !connected }
 
     init(configurationLoader: @escaping (Bool) throws -> [Profile] = { try KeychainStore.load(interactionAllowed: $0) },
@@ -366,7 +367,9 @@ import Combine
          saveProfiles: @escaping ([Profile]) throws -> Void = KeychainStore.save,
          validateProfile: ((Profile) async throws -> Void)? = nil,
          preparePacketTunnel: @escaping () throws -> Bool = TunnelService.prepare,
-         proxyInspector: @escaping (Int) -> Bool = ProxySnapshot.ownsSystemProxy) {
+         proxyInspector: @escaping (Int) -> Bool = ProxySnapshot.ownsSystemProxy,
+         tunnelRecoveryPending: @escaping () -> Bool = { [TunnelNetwork.journalPath, TunnelNetwork.legacyJournalPath].contains { FileManager.default.fileExists(atPath: $0) } }) {
+        self.tunnelRecoveryPending = tunnelRecoveryPending
         self.proxyInspector = proxyInspector
         self.preparePacketTunnel = preparePacketTunnel
         self.assistantStatus = assistantStatus ?? .shared

@@ -20,6 +20,9 @@ public final class TunnelNetwork {
         var ownsServerRoute = false
         var gateways: [String] = []
         var routes: [String] = []
+        // Optional fields keep journals from earlier components recoverable.
+        var directInterface: String?
+        var directRoutes: [String]?
         var dns: [DNSSnapshot] = []
     }
     private let journalURL: URL
@@ -72,11 +75,11 @@ public final class TunnelNetwork {
         for line in text.components(separatedBy: .newlines) { let pieces = line.split(separator: ":", maxSplits: 1); if pieces.count == 2 { result[pieces[0].trimmingCharacters(in: .whitespaces)] = pieces[1].trimmingCharacters(in: .whitespaces) } }
         return result
     }
-    private func gateway() throws -> String {
+    private func physicalRoute() throws -> (interface: String, gateway: String) {
         let route = fields(try run(["/sbin/route", "-n", "get", "default"]))
         guard let interface = route["interface"], interface.range(of: "^(en|bridge|bond)[0-9]+$", options: .regularExpression) != nil,
               let gateway = route["gateway"], Self.validIPv4(gateway) else { throw TunnelNetworkFailure("全局隧道需要直连的 Wi-Fi 或以太网入口，请先停用其他 VPN") }
-        return gateway
+        return (interface, gateway)
     }
     public static func validIPv4(_ text: String) -> Bool {
         var address = in_addr()
@@ -117,12 +120,33 @@ public final class TunnelNetwork {
         let flags = route["flags"] ?? ""
         return flags.contains("STATIC") && !flags.contains("WASCLONED") && !flags.contains("IFSCOPE")
     }
+    private static let directPrefixes = ["0.0.0.0/1", "128.0.0.0/1"]
+    private func scopedRoute(_ prefix: String, _ interface: String) -> [String: String] {
+        (try? run(["/sbin/route", "-n", "get", "-inet", prefix, "-ifscope", interface])).map(fields) ?? [:]
+    }
+    private func physicalBypass(_ route: [String: String], prefix: String, interface: String, gateways: [String], owned: Bool = false) -> Bool {
+        let destination = String(prefix.split(separator: "/")[0])
+        let flags = route["flags"] ?? ""
+        return (route["destination"] == destination || (destination == "0.0.0.0" && route["destination"] == "default"))
+            && route["mask"] == "128.0.0.0" && route["interface"] == interface
+            && gateways.contains(route["gateway"] ?? "") && flags.contains("STATIC") && flags.contains("IFSCOPE")
+            && !flags.contains("WASCLONED") && (!owned || flags.contains("PROTO1"))
+    }
+    private func verifyDirect(_ journal: Journal, gateway: String) throws {
+        guard let interface = journal.directInterface else { return }
+        for prefix in Self.directPrefixes {
+            guard physicalBypass(scopedRoute(prefix, interface), prefix: prefix, interface: interface, gateways: [gateway], owned: journal.directRoutes?.contains(prefix) == true) else {
+                throw TunnelNetworkFailure("普通网页的直连路由不可用，请重新连接")
+            }
+        }
+    }
     public func install(interface: String, endpoint: String, uid: UInt32, clientPID: Int32? = nil) throws {
         lock.lock(); defer { lock.unlock() }
         guard interface.range(of: "^utun[0-9]+$", options: .regularExpression) != nil, Self.validIPv4(endpoint) else { throw TunnelNetworkFailure("系统隧道参数无效") }
         guard !FileManager.default.fileExists(atPath: journalURL.path) else { throw TunnelNetworkFailure("请先恢复上一次系统隧道的网络设置") }
-        let entryGateway = try gateway()
-        var journal = Journal(uid: uid, interface: interface, endpoint: endpoint, clientPID: clientPID, gateways: [entryGateway])
+        let physical = try physicalRoute()
+        let entryGateway = physical.gateway
+        var journal = Journal(uid: uid, interface: interface, endpoint: endpoint, clientPID: clientPID, gateways: [entryGateway], directInterface: physical.interface, directRoutes: [])
         for service in try services() { journal.dns.append(.init(service: service, before: try dns(service))) }
         try store(journal) // Durable intent before the first mutation.
         do {
@@ -142,11 +166,20 @@ public final class TunnelNetwork {
             }
             _ = try run(["/sbin/ifconfig", interface, "inet", "198.18.0.1", Self.dnsAddress, "mtu", "1280", "up"])
             _ = try run(["/sbin/ifconfig", interface, "inet6", "fd7a:115c:a1e0::1", "prefixlen", "126", "alias"])
+            // IP_BOUND_IF alone cannot bypass the unscoped /1 TUN routes on
+            // macOS. Matching physical scoped routes serve only bound sockets;
+            // unbound DNS/UDP/IPv6 and AI traffic still enter the packet tunnel.
+            for prefix in Self.directPrefixes {
+                if physicalBypass(scopedRoute(prefix, physical.interface), prefix: prefix, interface: physical.interface, gateways: [entryGateway]) { continue }
+                journal.directRoutes?.append(prefix); try store(journal)
+                _ = try run(["/sbin/route", "-n", "add", "-inet", prefix, entryGateway, "-ifscope", physical.interface, "-proto1"])
+            }
             for prefix in ["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"] {
                 journal.routes.append(prefix); try store(journal)
                 _ = try run(["/sbin/route", "-n", "add", prefix.contains(":") ? "-inet6" : "-inet", prefix, "-interface", interface])
             }
             try verifyEntry(endpoint)
+            try verifyDirect(journal, gateway: entryGateway)
             for snapshot in journal.dns { _ = try run(["/usr/sbin/networksetup", "-setdnsservers", snapshot.service, Self.dnsAddress]) }
             flush()
         } catch { try? restore(); throw error }
@@ -158,14 +191,29 @@ public final class TunnelNetwork {
             guard try dns(snapshot.service) == [Self.dnsAddress] else { throw TunnelNetworkFailure("DNS 设置已被其他软件修改，请重新连接") }
         }
         try verifyEntry(journal.endpoint)
-        guard journal.ownsServerRoute, let current = try? gateway() else { return }
-        guard current != journal.gateways.last else { return }
-        let route = fields(try run(["/sbin/route", "-n", "get", journal.endpoint]))
-        let stillOwned = route["destination"] == journal.endpoint && journal.gateways.contains(route["gateway"] ?? "") && persistentBypass(route)
-        guard stillOwned || route["destination"] != journal.endpoint else { throw TunnelNetworkFailure("服务器入口路由已改变，请重新连接") }
-        journal.gateways.append(current); try store(journal)
-        _ = try run(["/sbin/route", "-n", stillOwned ? "change" : "add", "-host", journal.endpoint, current])
+        let physical = try physicalRoute()
+        if let interface = journal.directInterface, interface != physical.interface {
+            throw TunnelNetworkFailure("网络接口已改变，请重新连接以恢复普通网页直连")
+        }
+        let current = physical.gateway
+        if current != journal.gateways.last {
+            let route = fields(try run(["/sbin/route", "-n", "get", journal.endpoint]))
+            let stillOwned = route["destination"] == journal.endpoint && journal.gateways.contains(route["gateway"] ?? "") && persistentBypass(route)
+            if journal.ownsServerRoute && !stillOwned && route["destination"] == journal.endpoint { throw TunnelNetworkFailure("服务器入口路由已改变，请重新连接") }
+            let previousGateways = journal.gateways
+            journal.gateways.append(current); try store(journal)
+            if let interface = journal.directInterface {
+                for prefix in journal.directRoutes ?? [] {
+                    let existing = scopedRoute(prefix, interface)
+                    guard physicalBypass(existing, prefix: prefix, interface: interface, gateways: previousGateways, owned: true) else { throw TunnelNetworkFailure("普通网页的直连路由已改变，请重新连接") }
+                    _ = try run(["/sbin/route", "-n", "change", "-inet", prefix, current, "-ifscope", interface, "-proto1"])
+                }
+            }
+            if journal.ownsServerRoute { _ = try run(["/sbin/route", "-n", stillOwned ? "change" : "add", "-host", journal.endpoint, current]) }
+        }
+        try verifyDirect(journal, gateway: current)
     }
+
     public func restore(owner: UInt32? = nil) throws {
         lock.lock(); defer { lock.unlock() }
         if journalURL.path == Self.journalPath, !FileManager.default.fileExists(atPath: journalURL.path), FileManager.default.fileExists(atPath: Self.legacyJournalPath) {
@@ -191,6 +239,14 @@ public final class TunnelNetwork {
         for prefix in journal.routes.reversed() {
             let route = (try? run(["/sbin/route", "-n", "get", prefix.contains(":") ? "-inet6" : "-inet", prefix])).map(fields) ?? [:]
             if route["interface"] == journal.interface { _ = try run(["/sbin/route", "-n", "delete", prefix.contains(":") ? "-inet6" : "-inet", prefix, "-interface", journal.interface]) }
+        }
+        if let interface = journal.directInterface {
+            for prefix in (journal.directRoutes ?? []).reversed() {
+                let route = scopedRoute(prefix, interface)
+                if physicalBypass(route, prefix: prefix, interface: interface, gateways: journal.gateways, owned: true) {
+                    _ = try run(["/sbin/route", "-n", "delete", "-inet", prefix, route["gateway"]!, "-ifscope", interface])
+                }
+            }
         }
         if journal.ownsServerRoute {
             let route = (try? run(["/sbin/route", "-n", "get", journal.endpoint])).map(fields) ?? [:]
