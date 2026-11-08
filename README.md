@@ -1,10 +1,10 @@
 # 轻连 · Clearline
 
-macOS 上连接自有服务器的客户端。每位用户授权自己的 DigitalOcean 账号，优先选择并复用已有服务器和套餐，也可导入已有连接。提供 **AI 分流 / 全部代理 / 全局隧道**、连接阶段、出口 IP 验证和网络测速。
+macOS 上连接自有服务器的客户端。每位用户授权自己的 DigitalOcean 账号，优先选择并复用已有服务器和套餐，也可导入已有连接。提供 **AI 分流 / 全部代理**、连接阶段、出口 IP 验证和网络测速。
 
-**实验分支提示：全局隧道已通过 Apple Silicon Mac 上现有 Hysteria 2 连接的实机检查，尚未作为稳定版本发布。** 已验证无系统代理的 HTTPS 与原始 UDP STUN 使用同一服务器出口、UDP/TCP DNS 和系统默认解析可用，并完成断开恢复和再次连接。Intel、WireGuard 类全局连接及真实重启恢复尚未实机验收。旧“全部代理”语义保留，新全局模式需要明确选择；验证失败时恢复原代理模式，并明确显示 DNS/UDP 未接管。
+**当前为本地构建 7，尚未发布新的 GitHub Release。** 界面只提供 **AI 分流 / 全部代理**；两种模式均接管系统 DNS 和公网 TCP/UDP，再按域名决定解析与连接去向。原“全局隧道”设置迁移为“全部代理”。本轮分流功能已通过自动化测试，实机验收正在进行；先前全局接管已在 Apple Silicon Hysteria 2 连接中验证，不能据此替代新分流验收。
 
-**当前工作区为 0.3.0 的首次接入及 DNS/UDP 改造版（本机构建 6），尚未发布新的 GitHub Release。** 构建 6 修复了将 macOS 临时、带作用域的服务器路由缓存误认为持久直连路由的问题。已发布的 v0.3.0 使用旧的新建向导和系统代理；开发此分支时请运行 `./scripts/build.sh`，退出旧客户端后通过 `dist/Clearline-macOS-installer.pkg` 一次安装客户端和网络组件。服务器始终由各用户拥有和付费。
+开发此分支请运行 `./scripts/build.sh`，退出旧客户端后通过完整安装包一次更新客户端和匹配网络组件。服务器始终由各用户拥有和付费。
 
 ## 安装与首次使用
 
@@ -31,23 +31,24 @@ AI 可以读取 `~/Library/Application Support/Clearline/setup-status.json`。Sc
 
 ## 连接范围
 
-- **AI 分流**：Claude、ChatGPT / OpenAI / Codex 及必要的登录、附件、静态资源域名走系统代理；其他域名直连。该模式不接管系统 DNS 或 WebRTC UDP，界面会明确提示。清单见 [ai-domains.txt](core/ai-domains.txt)。
-- **全部代理**：保留旧版行为，遵循系统代理的流量通过服务器；不接管系统 DNS 和直连 UDP。原 `all` 设置仍对应此模式，不会因升级自动开启系统隧道。
-- **全局隧道**：独立选项，通过 macOS utun 虚拟网卡接管公网 IPv4/IPv6 的 TCP 与 UDP，并将系统 DNS 指向隧道内解析器。客户端 DNS 经已有加密连接从服务器转发到上游，不向本地运营商回退。局域网、回环及服务器入口保留直连，ICMP 不转发。Hysteria 2 服务端必须启用 UDP，入口当前要求可用的 IPv4 地址。
+- **AI 分流**：Claude、ChatGPT / OpenAI / Codex 及必要登录、附件、静态资源域名，DNS 经加密连接从服务器解析，TCP/UDP 也经同一服务器。其他域名使用连接前的本地 DNS，并通过物理网卡直连。清单见 [ai-domains.txt](core/ai-domains.txt)。
+- **全部代理**：公网 IPv4/IPv6 的 TCP、UDP 与系统 DNS 均通过服务器。原“全局隧道”设置对应此模式，不再额外显示第三个选项。
 
-域名按边界匹配，`chatgpt.com.evil.example` 不会命中 ChatGPT 规则。共享登录、验证主机按域名统一代理。隧道失败时，代理域名不会自动回退到本机直连。旧“仅 Claude”设置迁移为“AI 分流”。
+AI 分流中，已由本地 DNS 解析的普通域名 UDP 保持直连；无法识别域名的 UDP 和常见 STUN 端口经服务器保护出口，避免 WebRTC 暴露本地公网地址。局域网、回环和服务器入口保留直连，ICMP 不转发。Hysteria 2 服务端需启用 UDP，服务器入口当前要求可用的 IPv4 地址。
 
-完整安装包一次安装客户端和配套网络组件。使用 ZIP 安装客户端时，首次全局连接会引导从应用打开 `ClearlineSystemTunnel.pkg`，由电脑主人在 macOS 安装器中确认管理员权限，再返回连接。更新前先退出旧客户端。组件不接收连接密码，只管理虚拟网卡、DNS 与必要路由；它只接受当前构建中经过签名校验的内核。更换构建后需要更新配套组件。无需新增或升级服务器。
+分流 DNS 给 AI 域名分配内部地址，保留域名到后续 TCP/UDP 的关联，避免共享 CDN 地址导致普通网站被误分流。地址映射仅保存到本机 `~/Library/Application Support/Clearline/dns-map-v1.json`（0600），以免重连后浏览器缓存指向错误域名；不含密码、令牌或浏览 URL，不上传。未知的旧内部地址会拒绝连接。AI DNS 不向本地回退，本地 DNS 失败也不会自动改到服务器。域名按边界匹配，`chatgpt.com.evil.example` 不会命中；共享登录或验证域名按同一清单处理。
 
-AI 分流和全部代理使用系统代理。终端工具可从“工具”复制代理命令；临时端口在重新连接后可能变化。代理归属另行核对，其他 VPN 覆盖系统代理时会显示提示，不将服务器连通当作系统已接管。全局模式只有实际系统 UDP/TCP DNS、无 HTTP 代理的 TCP 出口和 STUN UDP 出口检查通过，且有效 DNS 列表均由隧道接管后，才报告 DNS/UDP 保护；失败时恢复原代理模式并显示失败原因。
+完整安装包同时更新客户端和网络组件。ZIP 安装方式可从应用打开配套 `ClearlineSystemTunnel.pkg`，由电脑主人完成 macOS 管理员认证。组件不接收连接密码，只管理虚拟网卡、DNS 和必要路由；它只接受当前构建中封装的精确内核签名。无需新增或升级服务器。
 
-“工具 → 检查 DNS / UDP 隧道”先通过原服务器核对 UDP 出口，再创建临时网卡测试 IPv4/IPv6 的 UDP/TCP DNS 双向读写。诊断不修改系统 DNS、默认路由或现有代理，结束时移除临时网卡；检测通过本身不表示已启用全局保护。Hysteria 2 可以保持原代理连接同时诊断；WireGuard 类连接需先断开，避免同一身份并行建连。
+只有实际 DNS 数据路径、服务器 TCP/UDP 出口与有效系统 DNS 接管验证通过后，才显示保护状态。接管失败时先恢复网络，再启用临时系统代理并明确显示“DNS / UDP 未保护”；这只是故障恢复，不是第三种可选模式。再次连接会重试正常隧道。系统代理被其他软件覆盖时另行提示，不把服务器通道连通当作系统已接管。
 
-连接状态包含服务器连接、隧道验证、接入 Mac 的阶段与耗时。传输中断时会保留本地代理接入并尝试恢复，Mac 唤醒或网络变化后也会检查连接。主动断开、退出或整个本地代理进程结束时，恢复先前的系统代理；后续由其它软件修改的代理设置会保留。
+“工具 → 检查 DNS / UDP 隧道”可在临时网卡上测试 IPv4/IPv6 的 UDP/TCP DNS 和服务器 UDP 出口，不修改系统 DNS、默认路由或现有代理。检测通过本身不代表系统保护已启用。Hysteria 2 可保持临时系统代理连接同时诊断；WireGuard 类连接需先断开，避免同一身份并行建连。
+
+连接状态显示阶段与耗时，唤醒或网络变化会检查连接。传输暂时中断时保留隧道接管并重试；主动断开、退出或进程结束时恢复本组件管理的网络设置，保留后来由其他软件修改的配置。
 
 ## 出口与测速
 
-“验证出口 IP”通过当前加密隧道请求 [Cloudflare trace](https://developers.cloudflare.com/fundamentals/reference/cdn-cgi-endpoint/)，显示实测公网 IP、地区和验证时间。检测失败时显示错误。AI 分流下，浏览器访问普通 IP 检测网站会按规则直连；内置验证单独核对隧道出口。
+“验证出口 IP”通过当前加密隧道请求 [Cloudflare trace](https://developers.cloudflare.com/fundamentals/reference/cdn-cgi-endpoint/)，显示实测公网 IP、地区和验证时间。检测失败时显示错误。AI 分流下，普通 IP/DNS 检测网站按普通域名规则直连和本地解析，可能仍显示国内出口；内置验证单独核对服务器出口。
 
 “网络测速”包含匿名 Claude HEAD 响应、普通网络响应和最多 5 MB 下载采样。403 / 429 会显示访问受限提示；这些结果不证明 Claude 账号会话可用。普通响应分别显示首次访问和复用连接的数据，下载速率包含建连耗时。测速遵循当前代理范围，可随时取消。程序没有遥测和上传测速结果的功能。
 
@@ -63,7 +64,7 @@ DigitalOcean 登录使用 [官方公共客户端 OAuth + PKCE](https://docs.digi
 
 加密迁移文件使用 Argon2id 和 XChaCha20-Poly1305。配置密码单独传递。多台电脑同时使用 WireGuard 时需要各自独立身份。公开源码、安装包和发布记录不包含开发者个人服务器地址或连接凭据。GitHub 仓库所属账号仍由 GitHub 正常显示。
 
-AI 分流的系统代理恢复记录位于 `~/Library/Application Support/Clearline/network-restore.plist`，权限为 `0600`。全局模式不设置临时系统代理。网络组件安装在 `/Library/PrivilegedHelperTools/org.clearline.tunnel`，由 launchd 按需唤起；无连接时空闲 30 秒退出，启动时会检查遗留恢复记录。root 专用记录持久保存在 `/Library/Application Support/Clearline/system-tunnel-state.plist`（`0600`），不会因重启清空。组件在断开、内核退出、自身重启或系统启动时恢复所管理的 DNS/路由，保留后来由其他软件修改的配置。传输暂时中断时保留隧道接管，DNS 不回退到本地。电脑主人可用 `sudo ./scripts/uninstall-tunnel.sh` 卸载组件；脚本在网络未恢复时停止卸载。更新前先准备备用联网方式。
+临时系统代理的恢复记录位于 `~/Library/Application Support/Clearline/network-restore.plist`，权限为 `0600`。正常隧道连接不设置系统代理。网络组件安装在 `/Library/PrivilegedHelperTools/org.clearline.tunnel`，由 launchd 按需唤起；无连接时空闲 30 秒退出，启动时会检查遗留恢复记录。root 专用记录持久保存在 `/Library/Application Support/Clearline/system-tunnel-state.plist`（`0600`），不会因重启清空。组件在断开、内核退出、自身重启或系统启动时恢复所管理的 DNS/路由，保留后来由其他软件修改的配置。传输暂时中断时保留隧道接管，DNS 不回退到本地。电脑主人可用 `sudo ./scripts/uninstall-tunnel.sh` 卸载组件；脚本在网络未恢复时停止卸载。更新前先准备备用联网方式。
 
 ## 构建与验证
 
@@ -78,7 +79,7 @@ go test -race ./...
 
 构建产物位于 `dist/`，包括一次安装客户端和组件的完整安装包、应用 ZIP，以及应用内的配套组件安装包。构建脚本固定 Go 工具链与校验值，可用 `CLEARLINE_GO` 指定已有工具链；Go 依赖由 `go.mod` / `go.sum` 固定。组件的内核签名白名单封装在自身只读代码段，不从用户可修改的配置读取。构建过程映射本机源码路径，发行包需再执行隐私扫描。
 
-仅更新网络组件时，可运行 `./scripts/build-tunnel-component.sh /Applications/Clearline.app/Contents/Helpers/clearline-core`，生成 `dist/ClearlineSystemTunnel-hotfix.pkg`。它将所选已安装内核的精确签名哈希封装到新组件中，不替换客户端和内核；安装前先退出全局模式，可保留 AI 分流或全部代理连接。该路径已用于构建 5 客户端搭配构建 6 组件的实机修复，避免为组件更新重复请求钥匙串读取。
+仅更新网络组件时，可运行 `./scripts/build-tunnel-component.sh /Applications/Clearline.app/Contents/Helpers/clearline-core`，生成 `dist/ClearlineSystemTunnel-hotfix.pkg`。它将所选已安装内核的精确签名哈希封装到新组件中，不替换客户端和内核；安装前先断开当前隧道，准备备用联网方式。该路径已用于构建 5 客户端搭配构建 6 组件的实机修复，避免为组件更新重复请求钥匙串读取。
 
 发行包采用本地签名，尚未使用 Developer ID 公证。目标 Mac 的 Gatekeeper 可能要求电脑主人确认打开，也可在目标 Mac 从源码构建。Intel 版本完成交叉编译，尚未完成实体设备验收。
 

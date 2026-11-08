@@ -185,8 +185,8 @@ import SwiftUI
         VStack(alignment: .leading, spacing: 16) {
             Text(app.networkPreflight?.title ?? "连接前检查").font(.title2.weight(.semibold))
             if let report = app.networkPreflight {
-                Text(app.routingMode == .global ? "全局隧道需要独立接管公网流量。请先停用其他系统代理或 VPN，再重新检查，避免多重代理和出口不一致。" : report.explanation).fixedSize(horizontal: false, vertical: true)
-                if app.routingMode != .global, report.serverUsesVPNRoute, let address = report.bypassAddress {
+                Text("分流和 DNS 保护需要独立接管网络。请先停用其他系统代理或 VPN，再重新检查。").fixedSize(horizontal: false, vertical: true)
+                if report.serverUsesVPNRoute, let address = report.bypassAddress {
                     Text("服务器入口：" + address).font(.callout).textSelection(.enabled)
                     Button("复制入口直连地址") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(address, forType: .string) }
                     if report.shadowrocketDetected { Text("Shadowrocket：配置 → 通用 → TUN 排除路由，添加这个单地址例外并更新配置。").font(.callout).foregroundStyle(.secondary) }
@@ -195,7 +195,6 @@ import SwiftUI
             HStack {
                 Button("暂不连接") { app.cancelNetworkCheck() }
                 Spacer()
-                Button("继续尝试") { app.continueAfterNetworkCheck() }.disabled(app.routingMode == .global)
                 Button("重新检查") { app.connect() }.buttonStyle(.borderedProminent)
             }.controlSize(.large)
         }.padding(24).frame(width: 460)

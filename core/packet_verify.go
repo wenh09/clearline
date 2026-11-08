@@ -90,13 +90,17 @@ func dnsProbeAnswers(query, reply []byte) ([]netip.Addr, error) {
 }
 
 func verifyDNSPath(ctx context.Context, dial dialConnection, address, network string) error {
-	query, err := dnsProbeQuery("example.com.")
+	_, err := queryDNSPath(ctx, dial, address, network, "example.com.")
+	return err
+}
+func queryDNSPath(ctx context.Context, dial dialConnection, address, network, name string) ([]netip.Addr, error) {
+	query, err := dnsProbeQuery(name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	c, err := dial(ctx, network, net.JoinHostPort(address, "53"))
 	if err != nil {
-		return errors.New("DNS 检测连接失败")
+		return nil, errors.New("DNS 检测连接失败")
 	}
 	defer c.Close()
 	stop := context.AfterFunc(ctx, func() { c.Close() })
@@ -119,10 +123,63 @@ func verifyDNSPath(ctx context.Context, dial dialConnection, address, network st
 		}
 	}
 	if err != nil {
-		return errors.New("DNS 检测未收到响应")
+		return nil, errors.New("DNS 检测未收到响应")
 	}
-	_, err = dnsProbeAnswers(query, reply)
-	return err
+	return dnsProbeAnswers(query, reply)
+}
+
+type packetTraceTunnel struct{}
+
+func (packetTraceTunnel) Close() {}
+func (packetTraceTunnel) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	_, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(packetTraceAddress, port))
+}
+func verifySplitPacketPath(parent context.Context, tunnel Tunnel, policy RoutingPolicy) error {
+	ctx, cancel := context.WithTimeout(parent, 16*time.Second)
+	defer cancel()
+	expected, err := verifyExitAt(ctx, tunnel, ipv4TraceURL)
+	if err != nil {
+		return errors.New("分流验证：无法读取服务器出口")
+	}
+	actual, err := verifyExitAt(ctx, packetTraceTunnel{}, ipv4TraceURL)
+	if err != nil || actual.IP != expected.IP {
+		return errors.New("分流验证：AI 系统 TCP 未经过原服务器")
+	}
+	if len(policy.Domains) == 0 {
+		return errors.New("分流验证：AI 域名列表为空")
+	}
+	for _, network := range []string{"udp", "tcp"} {
+		ips, err := queryDNSPath(ctx, (directProbeTunnel{}).DialContext, "198.18.0.2", network, policy.Domains[0]+".")
+		if err != nil || len(ips) == 0 {
+			return errors.New("分流验证：AI " + network + " DNS 不可用")
+		}
+		for _, ip := range ips {
+			if !fakeIPv4.Contains(ip) {
+				return errors.New("分流验证：AI DNS 未受分流规则保护")
+			}
+		}
+		ips, err = queryDNSPath(ctx, (directProbeTunnel{}).DialContext, "198.18.0.2", network, "example.com.")
+		if err != nil || len(ips) == 0 {
+			return errors.New("分流验证：本地 DNS 不可用")
+		}
+		for _, ip := range ips {
+			if fakeIPv4.Contains(ip) {
+				return errors.New("分流验证：普通 DNS 分流错误")
+			}
+		}
+	}
+	target, err := resolveSTUNThroughTunnel(ctx, tunnel)
+	if err != nil {
+		return errors.New("分流验证：UDP 检测解析失败")
+	}
+	if err = verifyUDPExit(ctx, (directProbeTunnel{}).DialContext, target, expected.IP); err != nil {
+		return errors.New("分流验证：UDP 出口未受保护")
+	}
+	return checkEffectiveDNS(ctx)
 }
 
 func resolveSTUNThroughTunnel(ctx context.Context, t Tunnel) (string, error) {

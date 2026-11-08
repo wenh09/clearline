@@ -8,23 +8,25 @@ import Combine
     enum State: String { case idle = "准备连接", connecting = "正在连接", connected = "已连接", reconnecting = "正在恢复连接", disconnecting = "正在断开", failed = "连接未完成" }
     @Published var profiles: [Profile] = []
     enum RoutingMode: String, CaseIterable, Identifiable {
-        case ai, all, global
+        case ai, all
         var id: String { rawValue }
-        var title: String { self == .ai ? "AI 分流" : self == .all ? "全部代理" : "全局隧道" }
-        var help: String { self == .global ? "接管公网 TCP、UDP 和系统 DNS；验证失败后恢复原代理模式。" : self == .ai ? "AI 网站走系统代理，其他域名直连；不接管系统 DNS 和 WebRTC UDP。" : "遵循系统代理的流量走服务器；不接管系统 DNS 和 WebRTC UDP。" }
+        var title: String { self == .ai ? "AI 分流" : "全部代理" }
+        var help: String { self == .ai ? "AI 域名的连接与 DNS 经美国服务器；其他域名本地解析并直连。无法识别域名的 UDP 经服务器保护出口。" : "公网连接与 DNS 均经美国服务器。" }
         var coreMode: String { self == .ai ? "ai" : "all" }
-        static func restoring(_ stored: String?) -> Self { Self(rawValue: stored ?? "") ?? .ai }
+        static func restoring(_ stored: String?) -> Self { stored == "global" ? .all : Self(rawValue: stored ?? "") ?? .ai }
     }
     @Published private(set) var routingMode = RoutingMode.restoring(UserDefaults.standard.string(forKey: "routingMode"))
-    var routingCaption: String { routingMode == .ai ? "Claude / ChatGPT · 美国" : routingMode == .all ? "全部代理 · 美国" : "全局隧道 · 美国" }
+    var routingCaption: String { routingMode == .ai ? "AI 与 DNS 分流 · 美国" : "全部代理 · 美国" }
     @Published private(set) var fallbackNotice: String?
-    private var fallbackRoutingMode: RoutingMode = .all
+    @Published private(set) var compatibilityProxy = false
+    var usesPacketTunnel: Bool { !compatibilityProxy }
+    var protectionNote: String { packetTunnelActive ? (routingMode == .ai ? "AI / DNS 已分流 · UDP 出口已保护" : "DNS / UDP 已接管") : "临时系统代理 · DNS / UDP 未保护" }
     @Published var needsTunnelApproval = false
     @Published private(set) var packetTunnelActive = false
     @Published private(set) var systemProxyActive = false
     private let proxyInspector: (Int) -> Bool
     private var proxyOwnershipTask: Task<Void, Never>?
-    var proxyOwnershipNote: String? { connected && routingMode != .global && !systemProxyActive ? "服务器通道已连接；其他 VPN 或代理仍在接管系统流量。" : nil }
+    var proxyOwnershipNote: String? { connected && compatibilityProxy && !systemProxyActive ? "服务器通道已连接；其他 VPN 或代理仍在接管系统流量。" : nil }
     @Published var showTunnelDiagnostic = false
     @Published private(set) var diagnosticRunning = false
     @Published private(set) var diagnosticStage = "idle"
@@ -65,7 +67,7 @@ import Combine
     }
     private let preparePacketTunnel: () throws -> Bool
     private func prepareGlobalTunnel() -> Bool {
-        guard routingMode == .global else { return true }
+        guard usesPacketTunnel else { return true }
         do {
             guard try preparePacketTunnel() else { needsTunnelApproval = true; return false }
             return true
@@ -74,16 +76,17 @@ import Combine
     func finishTunnelInstallation() {
         needsTunnelApproval = false
         if diagnosticPending { diagnosticPending = false; startTunnelDiagnostic() }
-        else if connected { setRoutingMode(.global) } else { connect() }
+        else if connected { setRoutingMode(routingMode, force: true) } else { connect() }
     }
 
-    func setRoutingMode(_ mode: RoutingMode) {
-        guard mode != routingMode, !busy, !loadingProfiles, !diagnosticRunning else { return }
+    func setRoutingMode(_ mode: RoutingMode, force: Bool = false) {
+        guard (mode != routingMode || force), !busy, !loadingProfiles, !diagnosticRunning else { return }
         let previous = routingMode
+        let previousCompatibility = compatibilityProxy
         fallbackNotice = nil
-        if mode == .global && previous != .global { fallbackRoutingMode = previous }
+        compatibilityProxy = false
         routingMode = mode; UserDefaults.standard.set(mode.rawValue, forKey: "routingMode")
-        if connected && !prepareGlobalTunnel() { routingMode = previous; UserDefaults.standard.set(previous.rawValue, forKey: "routingMode"); return }
+        if connected && !prepareGlobalTunnel() { routingMode = previous; compatibilityProxy = previousCompatibility; UserDefaults.standard.set(previous.rawValue, forKey: "routingMode"); return }
         guard connected, let profile = selected else { return }
         // Retire callbacks from the old session before restoring its proxy.
         // If restoration fails, retain both the live tunnel and its old scope.
@@ -96,17 +99,18 @@ import Combine
             let restored = await clean()
             guard session == token, wantsConnection else { return }
             guard restored else {
-                routingMode = previous; UserDefaults.standard.set(previous.rawValue, forKey: "routingMode")
+                routingMode = previous; compatibilityProxy = previousCompatibility; UserDefaults.standard.set(previous.rawValue, forKey: "routingMode")
                 finishProgress(); statusNote = message; state = .connected
                 return
             }
-            if mode == .global {
+            if usesPacketTunnel {
                 let shadowrocket = NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.liguangming.Shadowrocket" }
                 let report = await preflightInspector(profile, nil, shadowrocket)
                 guard session == token, wantsConnection else { return }
                 if report.requiresAcknowledgement {
                     routingMode = previous; UserDefaults.standard.set(previous.rawValue, forKey: "routingMode")
-                    fallbackNotice = "其他 VPN 或代理仍在接管网络，已保留“\(previous.title)”。"
+                    compatibilityProxy = true
+                    fallbackNotice = "其他 VPN 或代理仍在接管网络，已恢复临时系统代理；DNS / UDP 未保护。"
                     begin(profile); return
                 }
             }
@@ -451,7 +455,7 @@ import Combine
     func toggle() { if connected || busy { disconnect() } else if storageError { reloadProfiles(interactionAllowed: true) } else if profiles.isEmpty { showImport = true } else { connect() } }
     func connect() {
         guard !connected, !busy, !diagnosticRunning, let profile = selected else { return }
-        fallbackNotice = nil
+        fallbackNotice = nil; compatibilityProxy = false
         let id = UUID(); preflightID = id; checkingPreflight = true; showNetworkCheck = false
         let shadowrocket = NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.liguangming.Shadowrocket" }
         preflightTask = Task {
@@ -464,7 +468,7 @@ import Combine
     }
     func continueAfterNetworkCheck() {
         guard !checkingPreflight, !connected, !busy else { return }
-        guard routingMode != .global || networkPreflight?.requiresAcknowledgement != true else { return }
+        guard networkPreflight?.requiresAcknowledgement != true else { return }
         showNetworkCheck = false; startConnection()
     }
     func cancelNetworkCheck() { showNetworkCheck = false; networkPreflight = nil }
@@ -502,7 +506,7 @@ import Combine
             if self.reconnect && self.lastFailureRetryable { self.scheduleReconnect() } else { self.fail(self.statusNote ?? "连接已中断，请检查服务器和网络。") }
         }
         do {
-            try child.start(); try child.send(["profile": CoreRPC.dictionary(profile), "alternatives": CoreRPC.dictionary(profiles.filter { $0.id != profile.id }), "preferredID": preferredProfileID ?? "", "routingMode": routingMode.coreMode, "proxyDomains": Self.defaultDomains.components(separatedBy: .newlines), "packetTunnel": routingMode == .global])
+            try child.start(); try child.send(["profile": CoreRPC.dictionary(profile), "alternatives": CoreRPC.dictionary(profiles.filter { $0.id != profile.id }), "preferredID": preferredProfileID ?? "", "routingMode": routingMode.coreMode, "proxyDomains": Self.defaultDomains.components(separatedBy: .newlines), "packetTunnel": usesPacketTunnel])
             log("开始连接 · " + profile.protocolName)
             armConnectTimeout(token)
         } catch { fail("连接内核启动失败：" + error.localizedDescription) }
@@ -539,8 +543,8 @@ import Combine
             latency = event["latencyMs"] as? Int; lastHealthAt = Date(); retryUntil = nil; statusNote = nil
             if proxyApplied { finishReadyConnection() } else { advanceProgress(.applying) }
         case "ready":
-            packetTunnelActive = routingMode == .global && event["packetTunnel"] as? Bool == true
-            guard routingMode != .global || packetTunnelActive else { fail("系统隧道未接管 DNS/UDP，已停止连接以避免误报保护状态。"); return }
+            packetTunnelActive = usesPacketTunnel && event["packetTunnel"] as? Bool == true
+            guard !usesPacketTunnel || packetTunnelActive else { fail("系统隧道未接管 DNS/UDP，已停止连接以避免误报保护状态。"); return }
             armConnectTimeout(token)
             transportReady = true
             if event["retainsProxy"] as? Bool == true { coreSupportsRetention = true }
@@ -558,7 +562,7 @@ import Combine
         case "exitVerification": receiveExitVerification(event)
         case "stats": upload = (event["uploadBytes"] as? NSNumber)?.int64Value ?? 0; download = (event["downloadBytes"] as? NSNumber)?.int64Value ?? 0
         case "health":
-            if event["ok"] as? Bool == true { latency = event["latencyMs"] as? Int; lastHealthAt = Date(); statusNote = nil; message = packetTunnelActive ? "全局隧道已接入，DNS 和 UDP 经服务器转发" : "浏览器与遵循系统代理的应用已接入" }
+            if event["ok"] as? Bool == true { latency = event["latencyMs"] as? Int; lastHealthAt = Date(); statusNote = nil; message = packetTunnelActive ? protectionNote : "浏览器与遵循系统代理的应用已接入" }
             else { latency = nil; statusNote = "网络检查未响应，正在复查"; message = "连接响应异常，正在检查…"; log("健康检查暂未通过") }
         case "error":
             lastFailureRetryable = event["retryable"] as? Bool ?? true
@@ -574,14 +578,14 @@ import Combine
         finishProgress(); connectMs = connectionProgress.map { Int($0.elapsed(at: operationNow) * 1000) }
         state = .connected; connectedAt = Date(); backoff.reset(); statusNote = nil; retryUntil = nil
         networkPreflight = nil
-        message = packetTunnelActive ? "全局隧道已接入，DNS 和 UDP 经服务器转发" : "浏览器与遵循系统代理的应用已接入"; connectTimeout?.cancel()
+        message = packetTunnelActive ? protectionNote : "浏览器与遵循系统代理的应用已接入"; connectTimeout?.cancel()
         proxyOwnershipTask?.cancel()
-        systemProxyActive = routingMode != .global && httpPort.map(proxyInspector) == true
+        systemProxyActive = compatibilityProxy && httpPort.map(proxyInspector) == true
         proxyOwnershipTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard !Task.isCancelled, let self, self.connected else { return }
-                let active = self.routingMode != .global && self.httpPort.map(self.proxyInspector) == true
+                let active = self.compatibilityProxy && self.httpPort.map(self.proxyInspector) == true
                 if self.systemProxyActive != active { self.systemProxyActive = active }
             }
         }
@@ -593,7 +597,7 @@ import Combine
         child.onEvent = { [weak self] event in
             guard let self, self.session == token else { return }
             switch event["event"] as? String {
-            case "applied": self.proxyApplied = true; if !self.transportReady && self.coreSupportsRetention { self.proxyRetainedDuringRecovery = true }; self.finishReadyConnection(); self.log(self.packetTunnelActive ? "全局隧道与 DNS 已接入" : "系统代理已接入")
+            case "applied": self.proxyApplied = true; if !self.transportReady && self.coreSupportsRetention { self.proxyRetainedDuringRecovery = true }; self.finishReadyConnection(); self.log(self.packetTunnelActive ? self.protectionNote : "系统代理已接入")
             case "error": self.fail(event["message"] as? String ?? "系统代理设置失败。")
             case "restored": if self.wantsConnection { self.scheduleReconnect() }
             default: break
@@ -603,7 +607,7 @@ import Combine
             guard let self, self.session == token, self.wantsConnection, self.state == .connected else { return }
             self.statusNote = "网络接入已停止，正在恢复"; self.scheduleReconnect()
         }
-        do { try child.start(); try child.send(["action": routingMode == .global ? "monitor" : "enable", "httpPort": http, "socksPort": socks, "corePID": Int(pid)]) }
+        do { try child.start(); try child.send(["action": usesPacketTunnel ? "monitor" : "enable", "httpPort": http, "socksPort": socks, "corePID": Int(pid)]) }
         catch { fail("无法配置系统代理：" + error.localizedDescription) }
     }
     private func clean() async -> Bool {
@@ -672,7 +676,7 @@ import Combine
         }
     }
     private func fail(_ text: String) {
-        let fallback = routingMode == .global && wantsConnection ? fallbackRoutingMode : nil
+        let fallback = usesPacketTunnel && wantsConnection
         wantsConnection = false; waitingForNetwork = false; networkCheckTask?.cancel(); retryTask?.cancel(); connectTimeout?.cancel(); session = UUID()
         let token = session
         state = .disconnecting
@@ -680,9 +684,9 @@ import Combine
         Task {
             let restored = await clean()
             guard session == token else { return }
-            if restored, let fallback, let profile = selected {
-                routingMode = fallback; UserDefaults.standard.set(fallback.rawValue, forKey: "routingMode")
-                fallbackNotice = "全局隧道未通过验证：\(text)。已切回“\(fallback.title)”，DNS / UDP 未接管。"
+            if restored, fallback, let profile = selected {
+                compatibilityProxy = true
+                fallbackNotice = "隧道验证未通过：\(text)。已恢复临时系统代理；DNS / UDP 未保护。"
                 wantsConnection = true; backoff.reset(); begin(profile); return
             }
             finishProgress(); state = .failed; retryUntil = nil
@@ -775,6 +779,6 @@ import Combine
         let code: String
         if checkingPreflight { code = "checking_network" }
         else { switch state { case .idle: code = "idle"; case .connecting: code = "connecting"; case .connected: code = "connected"; case .reconnecting: code = "reconnecting"; case .disconnecting: code = "disconnecting"; case .failed: code = "failed" } }
-        assistantStatus.updateConnection(.init(loaded: !loadingProfiles && !storageError, profileCount: profiles.count, state: code, routingMode: routingMode.rawValue, phase: connectionProgress?.phase.rawValue, connected: connected, busy: busy, storageLocked: storageError, exitVerified: connected && exitVerification != nil, exitCountry: connected ? safeCountry : nil, networkConflict: networkPreflight?.requiresAcknowledgement == true || (connected && routingMode != .global && !systemProxyActive), errorCode: error, packetTunnelActive: packetTunnelActive, dnsProtected: connected && packetTunnelActive, udpProtected: connected && packetTunnelActive, systemProxyActive: connected && systemProxyActive, diagnosticStage: diagnosticStage, diagnosticPassed: diagnosticPassed))
+        assistantStatus.updateConnection(.init(loaded: !loadingProfiles && !storageError, profileCount: profiles.count, state: code, routingMode: routingMode.rawValue, phase: connectionProgress?.phase.rawValue, connected: connected, busy: busy, storageLocked: storageError, exitVerified: connected && exitVerification != nil, exitCountry: connected ? safeCountry : nil, networkConflict: networkPreflight?.requiresAcknowledgement == true || (connected && compatibilityProxy && !systemProxyActive), errorCode: error, packetTunnelActive: packetTunnelActive, dnsProtected: connected && packetTunnelActive, udpProtected: connected && packetTunnelActive, systemProxyActive: connected && systemProxyActive, diagnosticStage: diagnosticStage, diagnosticPassed: diagnosticPassed))
     }
 }

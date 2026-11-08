@@ -22,9 +22,11 @@ private to that user. Never use a developer's personal server as a default.
    tools. Existing WireGuard clients require their own identity/configuration.
 5. Run the connection preflight. Resolve other VPN routes to the server
    endpoint, preserve working connectivity, then connect and verify the exit.
-   AI split mode is a TCP system proxy and does not protect system DNS/UDP.
-   Global tunnel mode requires the matching bundled network component, which
-   the owner installs through macOS Installer with administrator approval.
+   Both AI split and all modes require the matching network component. AI
+   domains use tunneled DNS/data; ordinary domains use captured physical DNS
+   and interface-bound direct sockets. Unknown UDP/STUN stays protected. The
+   owner installs the component through macOS Installer with administrator
+   approval.
    Do not bypass that confirmation or run the credential-handling core as root.
    Inspect packetTunnelActive/dnsProtected/udpProtected separately from exit IP.
 6. Only if the user separately chooses “新建服务器”, request create permission

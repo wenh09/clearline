@@ -145,7 +145,7 @@ struct MainView: View {
                 Text(note).font(.system(size: 11)).foregroundStyle(.orange).multilineTextAlignment(.center).padding(.horizontal, 20)
             }
             if model.connected {
-                Text(model.packetTunnelActive ? "DNS / UDP 已接管" : "系统代理 · DNS / UDP 未接管")
+                Text(model.protectionNote)
                     .font(.system(size: 11)).foregroundStyle(model.packetTunnelActive ? accent : .secondary).padding(.top, 5)
             }
             NetworkActionsView().environmentObject(model)

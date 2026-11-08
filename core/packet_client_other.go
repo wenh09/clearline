@@ -9,7 +9,7 @@ import (
 
 type packetSession struct{ done chan error }
 
-func startPacketSession(context.Context, Tunnel, string) (*packetSession, error) {
+func startPacketSession(context.Context, Tunnel, string, ...*packetRouting) (*packetSession, error) {
 	return nil, errors.New("系统隧道仅支持 macOS")
 }
 func startPacketProbe(context.Context, Tunnel) (*packetSession, error) {

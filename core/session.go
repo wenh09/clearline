@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"time"
 )
@@ -45,10 +47,8 @@ func runSession(parent context.Context, r Request, input *bufio.Reader, output f
 		return err
 	}
 	var endpoint string
+	var routing *packetRouting
 	if r.PacketTunnel {
-		if policy.Mode != "all" {
-			return errors.New("系统隧道需使用全局模式")
-		}
 		// Only matching, validated candidates may receive the entry bypass.
 		candidates, _ := connectionCandidates(r.Profile, r.Alternatives, r.PreferredID)
 		r.Profile = candidates[0]
@@ -57,14 +57,34 @@ func runSession(parent context.Context, r Request, input *bufio.Reader, output f
 		if err != nil {
 			return err
 		}
+		config, e := os.UserConfigDir()
+		if e != nil {
+			return errors.New("无法定位分流 DNS 缓存")
+		}
+		names, e := openFakeIPCache(filepath.Join(config, "Clearline", "dns-map-v1.json"))
+		if e != nil {
+			return e
+		}
+		routing = &packetRouting{policy: policy, names: names}
+		if policy.Mode != "all" {
+			direct, e := capturePhysicalTunnel(parent)
+			if e != nil {
+				return e
+			}
+			routing.direct, routing.localDNS = direct, direct.servers
+		}
 	}
 	ctx, cancel := context.WithCancel(parent)
 	retained := newRetainedTunnel()
-	p, err := NewProxy(retained, policy, func(host, route string) {
+	var direct Tunnel
+	if routing != nil {
+		direct = routing.direct
+	}
+	p, err := newProxy(retained, policy, func(host, route string) {
 		if r.AuditRoutes {
 			output(map[string]any{"event": "route", "host": host, "route": route})
 		}
-	})
+	}, direct)
 	if err != nil {
 		cancel()
 		retained.Close()
@@ -258,12 +278,17 @@ func runSession(parent context.Context, r Request, input *bufio.Reader, output f
 				retained.set(tunnel)
 				if r.PacketTunnel && packets == nil {
 					output(map[string]any{"event": "progress", "stage": "applying"})
-					packets, e = startPacketSession(ctx, retained, endpoint)
+					packets, e = startPacketSession(ctx, retained, endpoint, routing)
 					if e != nil {
 						return connectionError{message: e.Error()}
 					}
 					packetFailure = packets.done
-					if e = verifyGlobalPacketPath(ctx, retained); e != nil {
+					if policy.Mode == "all" {
+						e = verifyGlobalPacketPath(ctx, retained)
+					} else {
+						e = verifySplitPacketPath(ctx, retained, policy)
+					}
+					if e != nil {
 						if failure := packets.deviceError(); failure != nil {
 							e = failure
 						}

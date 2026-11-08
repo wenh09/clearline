@@ -20,6 +20,7 @@ import (
 type Proxy struct {
 	internalToken string
 	tunnel        Tunnel
+	direct        Tunnel
 	policy        RoutingPolicy
 	audit         func(string, string)
 	httpListener  net.Listener
@@ -44,12 +45,18 @@ func (p *Proxy) dial(ctx context.Context, address string) (net.Conn, error) {
 	}
 	direct := route == "direct"
 	if direct {
+		if p.direct != nil {
+			return p.direct.DialContext(ctx, "tcp", address)
+		}
 		return (&net.Dialer{Timeout: 12 * time.Second, KeepAlive: 30 * time.Second}).DialContext(ctx, "tcp", address)
 	}
 	return p.tunnel.DialContext(ctx, "tcp", address)
 }
 
 func NewProxy(t Tunnel, policy RoutingPolicy, audit func(string, string), tokens ...string) (*Proxy, error) {
+	return newProxy(t, policy, audit, nil, tokens...)
+}
+func newProxy(t Tunnel, policy RoutingPolicy, audit func(string, string), direct Tunnel, tokens ...string) (*Proxy, error) {
 	h, e := net.Listen("tcp4", "127.0.0.1:0")
 	if e != nil {
 		return nil, e
@@ -63,7 +70,7 @@ func NewProxy(t Tunnel, policy RoutingPolicy, audit func(string, string), tokens
 	if len(tokens) != 0 {
 		token = tokens[0]
 	}
-	p := &Proxy{internalToken: token, tunnel: t, policy: policy, audit: audit, httpListener: h, socksListener: s, closed: make(chan struct{})}
+	p := &Proxy{internalToken: token, tunnel: t, direct: direct, policy: policy, audit: audit, httpListener: h, socksListener: s, closed: make(chan struct{})}
 	p.httpTransport = &http.Transport{DialContext: func(ctx context.Context, _, address string) (net.Conn, error) { return p.dial(ctx, address) }, ResponseHeaderTimeout: 20 * time.Second, MaxIdleConns: 32, MaxIdleConnsPerHost: 4, IdleConnTimeout: 30 * time.Second}
 	p.httpServer = &http.Server{Handler: http.HandlerFunc(p.handleHTTP), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32768}
 	go p.httpServer.Serve(h)

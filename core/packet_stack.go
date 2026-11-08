@@ -33,13 +33,14 @@ type packetDevice interface {
 	Close() error
 }
 
-// This stack never uses net.Dial or the system resolver. Both address families,
-// DNS, TCP and UDP go exclusively through the retained encrypted transport.
+// DNS, TCP and UDP follow the selected policy; direct sockets are explicitly
+// bound to the original physical interface and never use this virtual resolver.
 type packetStack struct {
 	stack       *stack.Stack
 	link        *channel.Endpoint
 	device      packetDevice
 	tunnel      Tunnel
+	routing     *packetRouting
 	ctx         context.Context
 	cancel      context.CancelFunc
 	connections sync.Map
@@ -72,9 +73,12 @@ func (p *packetStack) deviceError() error {
 	return p.failure
 }
 
-func newPacketStack(parent context.Context, device packetDevice, tunnel Tunnel) (*packetStack, error) {
+func newPacketStack(parent context.Context, device packetDevice, tunnel Tunnel, routing ...*packetRouting) (*packetStack, error) {
 	ctx, cancel := context.WithCancel(parent)
 	p := &packetStack{device: device, tunnel: tunnel, ctx: ctx, cancel: cancel, slots: make(chan struct{}, 1024)}
+	if len(routing) > 0 {
+		p.routing = routing[0]
+	}
 	p.stack = stack.New(stack.Options{NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol}, TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol}})
 	p.link = channel.New(1024, 1280, "")
 	if e := p.stack.CreateNIC(1, p.link); e != nil {
@@ -184,7 +188,14 @@ func (p *packetStack) forward(local net.Conn, id stack.TransportEndpointID, netw
 		return
 	}
 	ctx, cancel := context.WithTimeout(p.ctx, 12*time.Second)
-	remote, err := p.tunnel.DialContext(ctx, network, net.JoinHostPort(id.LocalAddress.String(), strconv.Itoa(int(id.LocalPort))))
+	address := net.JoinHostPort(id.LocalAddress.String(), strconv.Itoa(int(id.LocalPort)))
+	var remote net.Conn
+	var err error
+	if p.routing != nil {
+		remote, err = p.routing.dial(ctx, p.tunnel, network, address)
+	} else {
+		remote, err = p.tunnel.DialContext(ctx, network, address)
+	}
 	cancel()
 	if err != nil {
 		return
@@ -229,6 +240,12 @@ func (p *packetStack) Close() {
 }
 
 func dnsThroughTunnel(ctx context.Context, t Tunnel, query []byte) ([]byte, error) {
+	return dnsThroughServers(ctx, t, query, []string{"1.1.1.1:53", "9.9.9.9:53"})
+}
+func dnsThroughServers(ctx context.Context, t Tunnel, query []byte, servers []string, local ...bool) ([]byte, error) {
+	if t == nil {
+		return nil, errors.New("DNS 入口不可用")
+	}
 	var parser dnsmessage.Parser
 	h, err := parser.Start(query)
 	if err != nil || h.Response {
@@ -238,37 +255,53 @@ func dnsThroughTunnel(ctx context.Context, t Tunnel, query []byte) ([]byte, erro
 	if err != nil || len(questions) != 1 {
 		return nil, errors.New("DNS 查询无效")
 	}
-	for _, server := range []string{"1.1.1.1:53", "9.9.9.9:53"} {
-		attempt, cancel := context.WithTimeout(ctx, 5*time.Second)
-		c, e := t.DialContext(attempt, "tcp", server)
-		if e != nil {
+	for _, server := range servers {
+		networks := []string{"tcp"}
+		if len(local) > 0 && local[0] {
+			networks = []string{"udp", "tcp"}
+		}
+		for _, network := range networks {
+			attempt, cancel := context.WithTimeout(ctx, 5*time.Second)
+			c, e := t.DialContext(attempt, network, server)
+			if e != nil {
+				cancel()
+				continue
+			}
+			stop := context.AfterFunc(attempt, func() { c.Close() })
+			deadline, _ := attempt.Deadline()
+			c.SetDeadline(deadline)
+			var reply []byte
+			if network == "tcp" {
+				e = writeDatagram(c, query)
+				if e == nil {
+					reply, e = readDatagram(c)
+				}
+			} else {
+				_, e = c.Write(query)
+				if e == nil {
+					b := make([]byte, 65535)
+					var n int
+					n, e = c.Read(b)
+					reply = b[:n]
+				}
+			}
+			stop()
+			c.Close()
 			cancel()
-			continue
+			if e != nil {
+				continue
+			}
+			var response dnsmessage.Parser
+			rh, e := response.Start(reply)
+			if e != nil || !rh.Response || rh.ID != h.ID || rh.Truncated {
+				continue
+			}
+			rq, e := response.AllQuestions()
+			if e != nil || len(rq) != 1 || rq[0].Type != questions[0].Type || rq[0].Class != questions[0].Class || !strings.EqualFold(rq[0].Name.String(), questions[0].Name.String()) {
+				continue
+			}
+			return reply, nil
 		}
-		stop := context.AfterFunc(attempt, func() { c.Close() })
-		deadline, _ := attempt.Deadline()
-		c.SetDeadline(deadline)
-		e = writeDatagram(c, query)
-		var reply []byte
-		if e == nil {
-			reply, e = readDatagram(c)
-		}
-		stop()
-		c.Close()
-		cancel()
-		if e != nil {
-			continue
-		}
-		var response dnsmessage.Parser
-		rh, e := response.Start(reply)
-		if e != nil || !rh.Response || rh.ID != h.ID {
-			continue
-		}
-		rq, e := response.AllQuestions()
-		if e != nil || len(rq) != 1 || rq[0].Type != questions[0].Type || rq[0].Class != questions[0].Class || !strings.EqualFold(rq[0].Name.String(), questions[0].Name.String()) {
-			continue
-		}
-		return reply, nil
 	}
 	return nil, errors.New("隧道 DNS 暂不可用")
 }
@@ -289,7 +322,12 @@ func (p *packetStack) serveDNS(c net.Conn, network string) {
 			return
 		}
 		ctx, cancel := context.WithTimeout(p.ctx, 10*time.Second)
-		reply, e := dnsThroughTunnel(ctx, p.tunnel, query)
+		var reply []byte
+		if p.routing != nil {
+			reply, e = p.routing.dns(ctx, p.tunnel, query)
+		} else {
+			reply, e = dnsThroughTunnel(ctx, p.tunnel, query)
+		}
 		cancel()
 		if e != nil {
 			var parser dnsmessage.Parser

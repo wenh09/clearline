@@ -81,13 +81,13 @@ func rootAgentConnection(ctx context.Context) (*net.UnixConn, error) {
 	}
 	return u, nil
 }
-func startPacketSession(ctx context.Context, t Tunnel, endpoint string) (*packetSession, error) {
-	return openPacketSession(ctx, t, endpoint, "enable")
+func startPacketSession(ctx context.Context, t Tunnel, endpoint string, routing ...*packetRouting) (*packetSession, error) {
+	return openPacketSession(ctx, t, endpoint, "enable", routing...)
 }
 func startPacketProbe(ctx context.Context, t Tunnel) (*packetSession, error) {
 	return openPacketSession(ctx, t, "", "probe")
 }
-func openPacketSession(ctx context.Context, t Tunnel, endpoint, action string) (*packetSession, error) {
+func openPacketSession(ctx context.Context, t Tunnel, endpoint, action string, routing ...*packetRouting) (*packetSession, error) {
 	c, e := rootAgentConnection(ctx)
 	if e != nil {
 		return nil, e
@@ -143,7 +143,7 @@ func openPacketSession(ctx context.Context, t Tunnel, endpoint, action string) (
 	}
 	unix.CloseOnExec(fds[0])
 	file := os.NewFile(uintptr(fds[0]), "clearline-utun")
-	p, e := newPacketStack(ctx, &darwinPacketDevice{file: file}, t)
+	p, e := newPacketStack(ctx, &darwinPacketDevice{file: file}, t, routing...)
 	if e != nil {
 		file.Close()
 		return nil, e

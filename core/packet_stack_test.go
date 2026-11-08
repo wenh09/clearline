@@ -37,7 +37,16 @@ func (t *packetTestTunnel) DialContext(ctx context.Context, network, address str
 	go func() {
 		defer b.Close()
 		if strings.HasSuffix(address, ":53") {
-			query, e := readDatagram(b)
+			var query []byte
+			var e error
+			if network == "tcp" {
+				query, e = readDatagram(b)
+			} else {
+				buf := make([]byte, 4096)
+				var n int
+				n, e = b.Read(buf)
+				query = buf[:n]
+			}
 			if e != nil {
 				return
 			}
@@ -54,6 +63,9 @@ func (t *packetTestTunnel) DialContext(ctx context.Context, network, address str
 			builder.StartQuestions()
 			builder.Question(q)
 			builder.StartAnswers()
+			if q.Type == 65 {
+				builder.UnknownResource(dnsmessage.ResourceHeader{Name: q.Name, Class: dnsmessage.ClassINET, TTL: 30}, dnsmessage.UnknownResource{Type: 65, Data: []byte{0, 1, 0, 0, 4, 0, 4, 198, 51, 100, 23}})
+			}
 			count := 1
 			if large {
 				count = 100
@@ -66,7 +78,11 @@ func (t *packetTestTunnel) DialContext(ctx context.Context, network, address str
 				}
 			}
 			reply, _ := builder.Finish()
-			writeDatagram(b, reply)
+			if network == "tcp" {
+				writeDatagram(b, reply)
+			} else {
+				b.Write(reply)
+			}
 			return
 		}
 		buffer := make([]byte, 65535)
