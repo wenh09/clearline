@@ -25,7 +25,7 @@ func TestClaudeDomainBoundaries(t *testing.T) {
 			t.Errorf("must tunnel %s", host)
 		}
 	}
-	for _, host := range []string{"www.apple.com", "github.com", "www.cloudflare.com", "claude.ai.evil.example", "notclaude.ai", "anthropic.com.evil.example", "localhost", "printer.local", "127.0.0.1", "192.168.1.1", "::1", "8.8.8.8"} {
+	for _, host := range []string{"www.apple.com", "github.com", "claude.ai.evil.example", "notclaude.ai", "anthropic.com.evil.example", "localhost", "printer.local", "127.0.0.1", "192.168.1.1", "::1", "8.8.8.8"} {
 		if p.Route(host) != "direct" {
 			t.Errorf("must direct %s", host)
 		}

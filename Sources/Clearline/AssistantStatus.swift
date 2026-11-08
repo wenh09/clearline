@@ -39,8 +39,8 @@ import Foundation
     }
     struct Document: Encodable {
         let schemaVersion = 2
-        let version = "0.3.0"
-        let build = "5"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.3.0"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "development"
         let updatedAt: String
         let connectionSaved: Bool?
         let connected: Bool

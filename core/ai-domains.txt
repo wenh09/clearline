@@ -16,3 +16,11 @@ frontend-apps-multi-region.workos.com
 images.workoscdn.com
 setup.workos.com
 workos.imgix.net
+www.cloudflare.com
+one.one.one.one
+cloudflare-dns.com
+dns.google
+dns.quad9.net
+doh.opendns.com
+dns.alidns.com
+doh.pub

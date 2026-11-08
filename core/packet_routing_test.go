@@ -6,7 +6,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -25,7 +24,7 @@ func splitFixture(t *testing.T) (*packetRouting, *packetTestTunnel, *packetTestT
 		t.Fatal(err)
 	}
 	remote, direct := &packetTestTunnel{}, &packetTestTunnel{}
-	return &packetRouting{policy: policy, direct: direct, localDNS: []string{"192.0.2.53:53"}, names: cache}, remote, direct
+	return &packetRouting{policy: policy, direct: direct, names: cache}, remote, direct
 }
 func splitQuestion(t *testing.T, host string, kind dnsmessage.Type) []byte {
 	t.Helper()
@@ -38,7 +37,7 @@ func splitQuestion(t *testing.T, host string, kind dnsmessage.Type) []byte {
 	}
 	return q
 }
-func TestSplitDNSAndDataUseSameDomainPolicy(t *testing.T) {
+func TestAIStrictDNSUDPAndIPv6ShareServerWhileOrdinaryTCPIsDirect(t *testing.T) {
 	r, remote, direct := splitFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -86,34 +85,68 @@ func TestSplitDNSAndDataUseSameDomainPolicy(t *testing.T) {
 	direct.mu.Lock()
 	calls := append([]string(nil), direct.calls...)
 	direct.mu.Unlock()
-	if strings.Join(calls, "|") != "udp 192.0.2.53:53|tcp 198.51.100.23:443|udp 198.51.100.23:443" {
+	if len(calls) != 1 || calls[0] != "tcp 198.51.100.23:443" {
 		t.Fatalf("ordinary traffic did not stay local: %v", calls)
 	}
 	remote.mu.Lock()
 	defer remote.mu.Unlock()
 	for _, call := range remote.calls {
-		if !strings.Contains(call, "1.1.1.1:53") && !strings.Contains(call, "sub.ai.example:443") {
+		if call != "tcp 1.1.1.1:53" && call != "tcp sub.ai.example:443" && call != "udp sub.ai.example:443" && call != "udp 198.51.100.23:443" {
 			t.Fatalf("unexpected remote call: %s", call)
 		}
 	}
 }
-func TestSplitResolverFailuresNeverCrossPolicy(t *testing.T) {
+func TestAIStrictDNSNeverFallsBackToLocalForAnyDomain(t *testing.T) {
 	r, remote, direct := splitFixture(t)
 	remote.fail = true
-	if _, err := r.dns(context.Background(), remote, splitQuestion(t, "ai.example", dnsmessage.TypeA)); err == nil {
-		t.Fatal("offline AI resolved")
+	for _, host := range []string{"ai.example", "ordinary.example"} {
+		if _, err := r.dns(context.Background(), remote, splitQuestion(t, host, dnsmessage.TypeA)); err == nil {
+			t.Fatal("offline DNS resolved", host)
+		}
 	}
 	if len(direct.calls) != 0 {
-		t.Fatal("AI DNS leaked to local resolver")
+		t.Fatal("DNS fell back to local resolver")
 	}
 	remote.fail = false
 	direct.fail = true
-	before := len(remote.calls)
-	if _, err := r.dns(context.Background(), remote, splitQuestion(t, "ordinary.example", dnsmessage.TypeA)); err == nil {
-		t.Fatal("offline local DNS resolved")
+	if _, err := r.dns(context.Background(), remote, splitQuestion(t, "ordinary.example", dnsmessage.TypeA)); err != nil {
+		t.Fatal("DNS depended on local resolver", err)
 	}
-	if len(remote.calls) != before {
-		t.Fatal("ordinary DNS silently moved overseas")
+}
+func TestProxyHostnameResolutionAlsoUsesTunnelDNS(t *testing.T) {
+	remote := &packetTestTunnel{}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ips, err := resolverThroughTunnel(remote).LookupIPAddr(ctx, "ordinary.example")
+	if err != nil || len(ips) != 2 {
+		t.Fatal("tunneled hostname resolution", err)
+	}
+	remote.mu.Lock()
+	defer remote.mu.Unlock()
+	for _, call := range remote.calls {
+		if call != "tcp 1.1.1.1:53" {
+			t.Fatal("resolver escaped tunnel", call)
+		}
+	}
+}
+func TestIPv6AndEncryptedDNSCannotUsePhysicalFallback(t *testing.T) {
+	r, remote, direct := splitFixture(t)
+	for _, addr := range []string{"[2001:db8::23]:443", "198.51.100.23:853", "1.1.1.1:443", "8.8.8.8:443"} {
+		c, err := r.dial(context.Background(), remote, "tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Close()
+	}
+	if len(direct.calls) != 0 {
+		t.Fatal("IPv6 or encrypted DNS escaped")
+	}
+	remote.fail = true
+	if _, err := r.dial(context.Background(), remote, "tcp", "[2001:db8::23]:443"); err == nil {
+		t.Fatal("offline IPv6 succeeded")
+	}
+	if len(direct.calls) != 0 {
+		t.Fatal("IPv6 fell back to physical network")
 	}
 }
 func TestFakeIPCacheSurvivesReconnectAndRejectsUnknownAddresses(t *testing.T) {
@@ -264,5 +297,24 @@ func TestSplitPacketStackDNSAndBothFamiliesTCPUDP(t *testing.T) {
 	}
 	if len(direct.calls) != 0 {
 		t.Fatal("AI packets used physical fallback")
+	}
+}
+
+func TestAIProxyCommandsCannotBypassProtectedIPv6OrDNS(t *testing.T) {
+	r, remote, direct := splitFixture(t)
+	p, err := newProxy(remote, r.policy, nil, direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	for _, addr := range []string{"[2001:db8::23]:443", "198.51.100.23:853", "1.1.1.1:443"} {
+		c, err := p.dial(context.Background(), addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Close()
+	}
+	if len(direct.calls) != 0 || len(remote.calls) != 3 {
+		t.Fatal("explicit proxy command escaped AI protection")
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,11 +36,17 @@ type Proxy struct {
 }
 
 func (p *Proxy) dial(ctx context.Context, address string) (net.Conn, error) {
-	host, _, e := net.SplitHostPort(address)
+	host, port, e := net.SplitHostPort(address)
 	if e != nil {
 		return nil, errors.New("invalid address")
 	}
 	route := p.policy.Route(host)
+	if p.direct != nil {
+		ip, _ := netip.ParseAddr(host)
+		if ip.Is6() || protectedDNSAddress(ip) || port == "853" {
+			route = "tunnel"
+		}
+	}
 	if p.audit != nil {
 		p.audit(host, route)
 	}

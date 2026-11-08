@@ -137,15 +137,14 @@ import Darwin
         XCTAssertEqual(model.state, .idle)
         await stop(model, folder)
     }
-    func testBothModesWaitForOwnerApprovalWithoutStartingCore() async throws {
-        for mode in AppModel.RoutingMode.allCases {
-            let (model, folder) = try fixture(failures: 0, prepare: { false })
-            await loaded(model); model.setRoutingMode(mode); model.connect()
-            await until { model.needsTunnelApproval }
-            XCTAssertFalse(model.connected); XCTAssertFalse(model.packetTunnelActive)
-            XCTAssertEqual(count(folder), 0)
-            model.needsTunnelApproval = false; await stop(model, folder)
-        }
+    func testOnlyAIRequiresComponentApproval() async throws {
+        let (model, folder) = try fixture(failures: 0, prepare: { false })
+        await loaded(model); model.connect(); await until { model.needsTunnelApproval }
+        XCTAssertFalse(model.connected); XCTAssertEqual(count(folder), 0)
+        model.needsTunnelApproval = false; model.setRoutingMode(.all); model.connect()
+        await until { model.connected }; XCTAssertFalse(model.packetTunnelActive)
+        XCTAssertEqual(count(folder), 1)
+        await stop(model, folder)
     }
     func testMissingPacketProtectionUsesExplicitCompatibilityWarning() async throws {
         let (model, folder) = try fixture(failures: 0)
@@ -154,34 +153,34 @@ import Darwin
         try source.write(to: file, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: file.path)
         await loaded(model); model.connect()
-        await until { model.connected && model.compatibilityProxy }
+        await until { model.connected && !model.usesPacketTunnel }
         XCTAssertFalse(model.packetTunnelActive); XCTAssertNotNil(model.fallbackNotice)
-        XCTAssertTrue(model.protectionNote.contains("未保护")); XCTAssertEqual(count(folder), 2)
+        XCTAssertEqual(model.routingMode, .all); XCTAssertTrue(model.fallbackNotice?.contains("AI 保护未启用") == true); XCTAssertEqual(count(folder), 2)
         await stop(model, folder)
     }
     func testComponentApprovalPreservesWorkingCompatibilityUntilProtectedReconnect() async throws {
         var allowed = true
         let (model, folder) = try fixture(failures: 1, permanent: true, prepare: { allowed })
-        await loaded(model); model.connect(); await until { model.connected && model.compatibilityProxy }
-        allowed = false; model.setRoutingMode(.all)
+        await loaded(model); model.connect(); await until { model.connected && !model.usesPacketTunnel }
+        allowed = false; model.setRoutingMode(.ai)
         XCTAssertTrue(model.needsTunnelApproval); XCTAssertTrue(model.connected)
-        XCTAssertEqual(model.routingMode, .ai); XCTAssertTrue(model.compatibilityProxy); XCTAssertEqual(count(folder), 2)
+        XCTAssertEqual(model.routingMode, .all); XCTAssertTrue(!model.usesPacketTunnel); XCTAssertEqual(count(folder), 2)
         allowed = true; model.finishTunnelInstallation()
         await until { model.connected && model.packetTunnelActive && count(folder) == 3 }
-        XCTAssertFalse(model.compatibilityProxy)
+        XCTAssertFalse(!model.usesPacketTunnel)
         await stop(model, folder)
     }
     func testDiagnosticKeepsCompatibilityConnectionWithoutClaimingProtection() async throws {
         var allowed = true
-        let (model, folder) = try fixture(failures: 1, permanent: true, prepare: { allowed })
-        await loaded(model); model.setRoutingMode(.all); model.connect(); await until { model.connected && model.compatibilityProxy }
+        let (model, folder) = try fixture(failures: 0, prepare: { allowed })
+        await loaded(model); model.setRoutingMode(.all); model.connect(); await until { model.connected && !model.usesPacketTunnel }
         let pid = try String(contentsOf: folder.appendingPathComponent("agent-pid"), encoding: .utf8)
         allowed = false; model.startTunnelDiagnostic()
         XCTAssertTrue(model.needsTunnelApproval); XCTAssertTrue(model.connected)
         allowed = true; model.finishTunnelInstallation()
         await until { model.diagnosticPassed == true }
         XCTAssertEqual(model.routingMode, .all); XCTAssertTrue(model.connected); XCTAssertFalse(model.packetTunnelActive)
-        XCTAssertEqual(count(folder), 2)
+        XCTAssertEqual(count(folder), 1)
         XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("agent-pid"), encoding: .utf8), pid)
         await stop(model, folder)
     }
@@ -227,28 +226,29 @@ import Darwin
     private func recordedCommands(_ folder: URL) -> [[String: Any]] {
         ((try? String(contentsOf: folder.appendingPathComponent("commands"), encoding: .utf8)) ?? "").split(separator: "\n").compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
     }
-    func testOnlyTwoModesAndOldGlobalRestoresAll() {
+    func testOnlyTwoModesAndOldGlobalKeepsAIProtection() {
         XCTAssertEqual(AppModel.RoutingMode.restoring(nil), .ai)
         XCTAssertEqual(AppModel.RoutingMode.restoring("claude"), .ai)
         XCTAssertEqual(AppModel.RoutingMode.restoring("ai"), .ai)
         XCTAssertEqual(AppModel.RoutingMode.restoring("all"), .all)
-        XCTAssertEqual(AppModel.RoutingMode.restoring("global"), .all)
-        XCTAssertEqual(AppModel.RoutingMode.allCases.map(\.title), ["AI 分流", "全部代理"])
+        XCTAssertEqual(AppModel.RoutingMode.restoring("global"), .ai)
+        XCTAssertEqual(AppModel.RoutingMode.allCases.map(\.title), ["AI 分流", "普通代理"])
     }
-    func testBothModesRequestPacketProtectionAndMonitorWithoutSystemProxy() async throws {
+    func testAIUsesProtectedTunnelAndOrdinaryUsesSystemProxy() async throws {
         for mode in AppModel.RoutingMode.allCases {
             let (model, folder) = try fixture(failures: 0, retained: true)
             await loaded(model); model.setRoutingMode(mode); model.connect(); await until { model.connected }
-            XCTAssertTrue(model.packetTunnelActive); XCTAssertFalse(model.compatibilityProxy); XCTAssertFalse(model.systemProxyActive)
+            XCTAssertEqual(model.packetTunnelActive, mode == .ai)
+            XCTAssertEqual(model.systemProxyActive, mode == .all)
             let record = try JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent("initial-routing"))) as! [String: Any]
-            XCTAssertEqual(record["mode"] as? String, mode.coreMode); XCTAssertEqual(record["packetTunnel"] as? Bool, true)
+            XCTAssertEqual(record["mode"] as? String, mode.coreMode); XCTAssertEqual(record["packetTunnel"] as? Bool, mode == .ai)
             await stop(model, folder)
         }
     }
     func testTunnelFailureRestoresExplicitCompatibilityAndShowsReason() async throws {
         let (model, folder) = try fixture(failures: 1, permanent: true)
-        await loaded(model); model.setRoutingMode(.all); model.connect()
-        await until { model.connected && model.compatibilityProxy }
+        await loaded(model); model.connect()
+        await until { model.connected && !model.usesPacketTunnel }
         XCTAssertEqual(count(folder), 2); XCTAssertFalse(model.packetTunnelActive)
         XCTAssertTrue(model.fallbackNotice?.contains("fixture failure") == true)
         XCTAssertEqual(model.routingMode, .all)

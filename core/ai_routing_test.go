@@ -21,12 +21,12 @@ func TestAIDefaultsCoverServicesAndNarrowDependencies(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, host := range []string{"claude.ai", "api.anthropic.com", "claude.com", "bridge.claudeusercontent.com", "widget.claudemcpcontent.com", "chatgpt.com", "ws.chatgpt.com", "auth.openai.com", "api.openai.com", "desktop.chat.openai.com", "cdn.oaistatic.com", "files.oaiusercontent.com", "ab.oaistatsig.com", "cdn.openaimerge.com", "challenges.cloudflare.com", "cdn.workos.com", "forwarder.workos.com", "frontend-apps-multi-region.workos.com", "images.workoscdn.com", "setup.workos.com", "workos.imgix.net", "API.OPENAI.COM."} {
+		for _, host := range []string{"claude.ai", "api.anthropic.com", "claude.com", "bridge.claudeusercontent.com", "widget.claudemcpcontent.com", "chatgpt.com", "ws.chatgpt.com", "auth.openai.com", "api.openai.com", "desktop.chat.openai.com", "cdn.oaistatic.com", "files.oaiusercontent.com", "ab.oaistatsig.com", "cdn.openaimerge.com", "challenges.cloudflare.com", "cdn.workos.com", "forwarder.workos.com", "frontend-apps-multi-region.workos.com", "images.workoscdn.com", "setup.workos.com", "workos.imgix.net", "API.OPENAI.COM.", "www.cloudflare.com", "one.one.one.one", "dns.google", "cloudflare-dns.com", "dns.quad9.net", "doh.opendns.com", "dns.alidns.com", "doh.pub"} {
 			if p.Route(host) != "tunnel" {
 				t.Errorf("AI domain must tunnel: %s", host)
 			}
 		}
-		for _, host := range []string{"www.baidu.com", "www.apple.com.cn", "github.com", "www.cloudflare.com", "cloudflare.com", "workos.com", "www.workos.com", "auth0.com", "js.stripe.com", "intercom.io", "chatgpt.com.evil.test", "notchatgpt.com", "api.openai.com.evil.test", "oaistatic.com.evil.test", "evilchallenges.cloudflare.com", "challenges.cloudflare.com.evil.test", "127.0.0.1", "192.168.1.1", "::1", "8.8.8.8"} {
+		for _, host := range []string{"www.baidu.com", "www.apple.com.cn", "github.com", "cloudflare.com", "dash.cloudflare.com", "www.cloudflare.com.evil.test", "dns.google.evil.test", "workos.com", "www.workos.com", "auth0.com", "js.stripe.com", "intercom.io", "chatgpt.com.evil.test", "notchatgpt.com", "api.openai.com.evil.test", "oaistatic.com.evil.test", "evilchallenges.cloudflare.com", "challenges.cloudflare.com.evil.test", "127.0.0.1", "192.168.1.1", "::1", "8.8.8.8"} {
 			if p.Route(host) != "direct" {
 				t.Errorf("ordinary or lookalike domain must stay direct: %s", host)
 			}

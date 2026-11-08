@@ -48,6 +48,7 @@ func runSession(parent context.Context, r Request, input *bufio.Reader, output f
 	}
 	var endpoint string
 	var routing *packetRouting
+	var physical *physicalTunnel
 	if r.PacketTunnel {
 		// Only matching, validated candidates may receive the entry bypass.
 		candidates, _ := connectionCandidates(r.Profile, r.Alternatives, r.PreferredID)
@@ -71,11 +72,14 @@ func runSession(parent context.Context, r Request, input *bufio.Reader, output f
 			if e != nil {
 				return e
 			}
-			routing.direct, routing.localDNS = direct, direct.servers
+			routing.direct, physical = direct, direct
 		}
 	}
 	ctx, cancel := context.WithCancel(parent)
 	retained := newRetainedTunnel()
+	if physical != nil {
+		physical.useTunnelDNS(retained)
+	}
 	var direct Tunnel
 	if routing != nil {
 		direct = routing.direct

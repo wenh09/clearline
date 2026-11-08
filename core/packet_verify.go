@@ -149,6 +149,9 @@ func verifySplitPacketPath(parent context.Context, tunnel Tunnel, policy Routing
 	if err != nil || actual.IP != expected.IP {
 		return errors.New("分流验证：AI 系统 TCP 未经过原服务器")
 	}
+	if expected.Country != "US" {
+		return errors.New("AI 验证：服务器出口不在预期美国地区")
+	}
 	if len(policy.Domains) == 0 {
 		return errors.New("分流验证：AI 域名列表为空")
 	}
@@ -164,7 +167,7 @@ func verifySplitPacketPath(parent context.Context, tunnel Tunnel, policy Routing
 		}
 		ips, err = queryDNSPath(ctx, (directProbeTunnel{}).DialContext, "198.18.0.2", network, "example.com.")
 		if err != nil || len(ips) == 0 {
-			return errors.New("分流验证：本地 DNS 不可用")
+			return errors.New("分流验证：普通域名的隧道 DNS 不可用")
 		}
 		for _, ip := range ips {
 			if fakeIPv4.Contains(ip) {

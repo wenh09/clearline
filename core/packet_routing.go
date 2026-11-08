@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -128,12 +127,9 @@ func (c *fakeIPCache) lookup(ip netip.Addr) (string, bool) {
 }
 
 type packetRouting struct {
-	policy   RoutingPolicy
-	direct   Tunnel
-	localDNS []string
-	names    *fakeIPCache
-	mu       sync.Mutex
-	ordinary map[netip.Addr]time.Time
+	policy RoutingPolicy
+	direct Tunnel
+	names  *fakeIPCache
 }
 
 func (r *packetRouting) dial(ctx context.Context, tunnel Tunnel, network, address string) (net.Conn, error) {
@@ -162,15 +158,10 @@ func (r *packetRouting) dial(ctx context.Context, tunnel Tunnel, network, addres
 	if r.direct == nil {
 		return nil, errors.New("本地直连入口不可用")
 	}
-	if network == "udp" {
-		// Literal/unknown UDP (including WebRTC STUN) has no reliable domain
-		// identity. Protect its exit; locally resolved ordinary hosts go direct.
-		r.mu.Lock()
-		expiry := r.ordinary[ip]
-		r.mu.Unlock()
-		if time.Now().After(expiry) || port == "3478" || port == "5349" || port == "19302" {
-			return tunnel.DialContext(ctx, network, address)
-		}
+	// DNS, all UDP and IPv6 share the server exit even when a page uses
+	// unrelated probe domains, cached addresses or encrypted DNS.
+	if network == "udp" || ip.Is6() || port == "853" || protectedDNSAddress(ip) {
+		return tunnel.DialContext(ctx, network, address)
 	}
 	return r.direct.DialContext(ctx, network, address)
 }
@@ -181,13 +172,7 @@ func (r *packetRouting) dns(ctx context.Context, tunnel Tunnel, query []byte) ([
 	}
 	question := message.Questions[0]
 	ai := r.policy.Route(question.Name.String()) == "tunnel"
-	var reply []byte
-	var err error
-	if ai {
-		reply, err = dnsThroughTunnel(ctx, tunnel, query)
-	} else {
-		reply, err = dnsThroughServers(ctx, r.direct, query, r.localDNS, true)
-	}
+	reply, err := dnsThroughTunnel(ctx, tunnel, query)
 	if err != nil {
 		return nil, err
 	}
@@ -229,30 +214,29 @@ func (r *packetRouting) dns(ctx context.Context, tunnel Tunnel, query []byte) ([
 		response.Header.AuthenticData = false // Synthetic addresses are not DNSSEC signatures.
 		return response.Pack()
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.ordinary == nil {
-		r.ordinary = map[netip.Addr]time.Time{}
-	}
-	now := time.Now()
-	if len(r.ordinary) > 32768 {
-		for ip, expiry := range r.ordinary {
-			if now.After(expiry) {
-				delete(r.ordinary, ip)
-			}
-		}
-	}
-	for _, a := range append(response.Answers, response.Additionals...) {
-		var ip netip.Addr
-		switch body := a.Body.(type) {
-		case *dnsmessage.AResource:
-			ip = netip.AddrFrom4(body.A)
-		case *dnsmessage.AAAAResource:
-			ip = netip.AddrFrom16(body.AAAA)
-		}
-		if ip.IsValid() && len(r.ordinary) < 65536 {
-			r.ordinary[ip] = now.Add(time.Duration(min(a.Header.TTL, 86400)) * time.Second)
-		}
-	}
 	return reply, nil
+}
+
+// Keep common literal encrypted-DNS endpoints inside the AI tunnel as well.
+func protectedDNSAddress(ip netip.Addr) bool {
+	for _, text := range []string{"1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9", "149.112.112.112"} {
+		if ip == netip.MustParseAddr(text) {
+			return true
+		}
+	}
+	return false
+}
+func resolverThroughTunnel(tunnel Tunnel) *net.Resolver {
+	return &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var last error
+		// Go's resolver uses DNS TCP framing for a non-PacketConn stream.
+		for _, address := range []string{"1.1.1.1:53", "9.9.9.9:53"} {
+			c, err := tunnel.DialContext(ctx, "tcp", address)
+			if err == nil {
+				return c, nil
+			}
+			last = err
+		}
+		return nil, last
+	}}
 }

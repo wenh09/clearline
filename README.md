@@ -2,7 +2,7 @@
 
 macOS 上连接自有服务器的客户端。每位用户授权自己的 DigitalOcean 账号，优先选择并复用已有服务器和套餐，也可导入已有连接。提供 **AI 分流 / 全部代理**、连接阶段、出口 IP 验证和网络测速。
 
-**当前为本地构建 7，尚未发布新的 GitHub Release。** 界面只提供 **AI 分流 / 全部代理**；两种模式均接管系统 DNS 和公网 TCP/UDP，再按域名决定解析与连接去向。原“全局隧道”设置迁移为“全部代理”。本轮分流功能已通过自动化测试，实机验收正在进行；先前全局接管已在 Apple Silicon Hysteria 2 连接中验证，不能据此替代新分流验收。
+**当前为本地构建 8，尚未发布新的 GitHub Release。** 两种模式按用途区分：**AI 分流**在域名分流的同时统一保护 DNS、UDP 和 IPv6 出口；**普通代理**沿用系统 HTTP/HTTPS/SOCKS 代理，侧重连通性。此前的“全部代理”设置仍映射到普通代理，旧“全局隧道”设置迁移到 AI 分流以保留防泄漏意图。已在 Apple Silicon / Hysteria 2 上验证普通代理、AI 系统 DNS 和 TCP/UDP 出口，以及 Chromium 浏览器的 WebRTC 公网出口一致；IPv6 HTTPS 当前不可用，路由仍被捕获且无本地回退。Intel、WireGuard 类连接和真实重启恢复未实机验收，不保证 Claude 账号或第三方风险评分通过。
 
 开发此分支请运行 `./scripts/build.sh`，退出旧客户端后通过完整安装包一次更新客户端和匹配网络组件。服务器始终由各用户拥有和付费。
 
@@ -31,24 +31,24 @@ AI 可以读取 `~/Library/Application Support/Clearline/setup-status.json`。Sc
 
 ## 连接范围
 
-- **AI 分流**：Claude、ChatGPT / OpenAI / Codex 及必要登录、附件、静态资源域名，DNS 经加密连接从服务器解析，TCP/UDP 也经同一服务器。其他域名使用连接前的本地 DNS，并通过物理网卡直连。清单见 [ai-domains.txt](core/ai-domains.txt)。
-- **全部代理**：公网 IPv4/IPv6 的 TCP、UDP 与系统 DNS 均通过服务器。原“全局隧道”设置对应此模式，不再额外显示第三个选项。
+- **AI 分流**：Claude、ChatGPT / OpenAI / Codex 及必要登录、附件、验证和静态资源连接经过服务器；其他普通 IPv4 网页连接直连。**系统 DNS、全部公网 UDP 和 IPv6 统一经过服务器**，避免 AI 页面使用普通检测域名、任意 STUN 端口或 IPv6 暴露本地出口。服务器 IPv6 不可用时失败，不回退到本地 IPv6。
+- **普通代理**：保留原系统 HTTP/HTTPS/SOCKS 代理行为，遵循系统代理的连接经服务器；DNS 和 UDP 沿用系统设置。不要求网络组件，也不显示 AI 防泄漏已启用。
 
-AI 分流中，已由本地 DNS 解析的普通域名 UDP 保持直连；无法识别域名的 UDP 和常见 STUN 端口经服务器保护出口，避免 WebRTC 暴露本地公网地址。局域网、回环和服务器入口保留直连，ICMP 不转发。Hysteria 2 服务端需启用 UDP，服务器入口当前要求可用的 IPv4 地址。
+AI 模式的 DNS 统一经加密隧道从服务器查询；给 AI 域名分配内部地址，保留域名到 TCP/UDP 的关联。普通域名也从隧道解析，只将其 IPv4 网页连接直连。常见加密 DNS 域名、字面解析器地址和 DNS-over-TLS 端口也经过服务器。域名清单见 [ai-domains.txt](core/ai-domains.txt)，只匹配完整域名及其子域，不匹配相似后缀。局域网、回环和服务器入口保留直连，ICMP 不转发。
 
-分流 DNS 给 AI 域名分配内部地址，保留域名到后续 TCP/UDP 的关联，避免共享 CDN 地址导致普通网站被误分流。地址映射仅保存到本机 `~/Library/Application Support/Clearline/dns-map-v1.json`（0600），以免重连后浏览器缓存指向错误域名；不含密码、令牌或浏览 URL，不上传。未知的旧内部地址会拒绝连接。AI DNS 不向本地回退，本地 DNS 失败也不会自动改到服务器。域名按边界匹配，`chatgpt.com.evil.example` 不会命中；共享登录或验证域名按同一清单处理。
+内部地址映射仅存本机 `~/Library/Application Support/Clearline/dns-map-v1.json`（0600），跨重连保留以免浏览器缓存指向错误域名，不含密码、令牌或浏览 URL，不上传。未知的旧内部地址拒绝连接。AI DNS 和 IPv6 不向本地回退；传输中断时保留隧道接管并重试。
 
-完整安装包同时更新客户端和网络组件。ZIP 安装方式可从应用打开配套 `ClearlineSystemTunnel.pkg`，由电脑主人完成 macOS 管理员认证。组件不接收连接密码，只管理虚拟网卡、DNS 和必要路由；它只接受当前构建中封装的精确内核签名。无需新增或升级服务器。
+AI 模式需要匹配的网络组件，服务端必须支持 UDP，入口当前要求可用 IPv4。完整安装包同时更新客户端和组件。ZIP 方式可从应用打开配套 `ClearlineSystemTunnel.pkg`，由电脑主人完成 macOS 管理员认证。组件不接收连接密码，只管理虚拟网卡、DNS 和必要路由，只接受构建中封装的精确内核签名。无需新增或升级服务器。
 
-只有实际 DNS 数据路径、服务器 TCP/UDP 出口与有效系统 DNS 接管验证通过后，才显示保护状态。接管失败时先恢复网络，再启用临时系统代理并明确显示“DNS / UDP 未保护”；这只是故障恢复，不是第三种可选模式。再次连接会重试正常隧道。系统代理被其他软件覆盖时另行提示，不把服务器通道连通当作系统已接管。
+只有实际 DNS 数据路径、美国 TCP/UDP 出口与有效 DNS 接管检查通过后，才显示 AI 防泄漏已启用。验证失败时先恢复网络，再明确切换为普通代理并显示“AI 保护未启用”，不会继续以 AI 模式显示连接成功。连接普通代理本身不证明 Claude 检测通过。IP 的机房属性、第三方信誉评分、账号状态和浏览器时区等不由 VPN 网络设置保证；程序不伪造浏览器环境或绕过站点验证。
 
-“工具 → 检查 DNS / UDP 隧道”可在临时网卡上测试 IPv4/IPv6 的 UDP/TCP DNS 和服务器 UDP 出口，不修改系统 DNS、默认路由或现有代理。检测通过本身不代表系统保护已启用。Hysteria 2 可保持临时系统代理连接同时诊断；WireGuard 类连接需先断开，避免同一身份并行建连。
+“工具 → 检查 DNS / UDP 隧道”可在临时网卡上测试 IPv4/IPv6 的 UDP/TCP DNS 和服务器 UDP 出口，不修改系统 DNS、默认路由或现有代理。检测通过不表示系统保护已启用。Hysteria 2 可保持普通代理连接同时诊断；WireGuard 类连接需先断开，避免同一身份并行建连。
 
-连接状态显示阶段与耗时，唤醒或网络变化会检查连接。传输暂时中断时保留隧道接管并重试；主动断开、退出或进程结束时恢复本组件管理的网络设置，保留后来由其他软件修改的配置。
+连接状态显示阶段与耗时，唤醒或网络变化会检查连接。主动断开、退出或进程结束时恢复本组件管理的网络设置，保留后来由其他软件修改的配置。
 
 ## 出口与测速
 
-“验证出口 IP”通过当前加密隧道请求 [Cloudflare trace](https://developers.cloudflare.com/fundamentals/reference/cdn-cgi-endpoint/)，显示实测公网 IP、地区和验证时间。检测失败时显示错误。AI 分流下，普通 IP/DNS 检测网站按普通域名规则直连和本地解析，可能仍显示国内出口；内置验证单独核对服务器出口。
+“验证出口 IP”通过当前加密隧道请求 [Cloudflare trace](https://developers.cloudflare.com/fundamentals/reference/cdn-cgi-endpoint/)，显示实测公网 IP、地区和验证时间。检测失败时显示错误。AI 分流下，普通 IPv4 检测网站仍可能直连，系统 DNS、UDP 和 IPv6 则统一保护；内置验证单独核对服务器出口。
 
 “网络测速”包含匿名 Claude HEAD 响应、普通网络响应和最多 5 MB 下载采样。403 / 429 会显示访问受限提示；这些结果不证明 Claude 账号会话可用。普通响应分别显示首次访问和复用连接的数据，下载速率包含建连耗时。测速遵循当前代理范围，可随时取消。程序没有遥测和上传测速结果的功能。
 
@@ -64,7 +64,7 @@ DigitalOcean 登录使用 [官方公共客户端 OAuth + PKCE](https://docs.digi
 
 加密迁移文件使用 Argon2id 和 XChaCha20-Poly1305。配置密码单独传递。多台电脑同时使用 WireGuard 时需要各自独立身份。公开源码、安装包和发布记录不包含开发者个人服务器地址或连接凭据。GitHub 仓库所属账号仍由 GitHub 正常显示。
 
-临时系统代理的恢复记录位于 `~/Library/Application Support/Clearline/network-restore.plist`，权限为 `0600`。正常隧道连接不设置系统代理。网络组件安装在 `/Library/PrivilegedHelperTools/org.clearline.tunnel`，由 launchd 按需唤起；无连接时空闲 30 秒退出，启动时会检查遗留恢复记录。root 专用记录持久保存在 `/Library/Application Support/Clearline/system-tunnel-state.plist`（`0600`），不会因重启清空。组件在断开、内核退出、自身重启或系统启动时恢复所管理的 DNS/路由，保留后来由其他软件修改的配置。传输暂时中断时保留隧道接管，DNS 不回退到本地。电脑主人可用 `sudo ./scripts/uninstall-tunnel.sh` 卸载组件；脚本在网络未恢复时停止卸载。更新前先准备备用联网方式。
+普通代理的恢复记录位于 `~/Library/Application Support/Clearline/network-restore.plist`，权限为 `0600`。AI 隧道连接不设置系统代理。网络组件安装在 `/Library/PrivilegedHelperTools/org.clearline.tunnel`，由 launchd 按需唤起；无连接时空闲 30 秒退出，启动时会检查遗留恢复记录。root 专用记录持久保存在 `/Library/Application Support/Clearline/system-tunnel-state.plist`（`0600`），不会因重启清空。组件在断开、内核退出、自身重启或系统启动时恢复所管理的 DNS/路由，保留后来由其他软件修改的配置。传输暂时中断时保留隧道接管，DNS 不回退到本地。电脑主人可用 `sudo ./scripts/uninstall-tunnel.sh` 卸载组件；脚本在网络未恢复时停止卸载。更新前先准备备用联网方式。
 
 ## 构建与验证
 

@@ -10,23 +10,22 @@ import Combine
     enum RoutingMode: String, CaseIterable, Identifiable {
         case ai, all
         var id: String { rawValue }
-        var title: String { self == .ai ? "AI 分流" : "全部代理" }
-        var help: String { self == .ai ? "AI 域名的连接与 DNS 经美国服务器；其他域名本地解析并直连。无法识别域名的 UDP 经服务器保护出口。" : "公网连接与 DNS 均经美国服务器。" }
+        var title: String { self == .ai ? "AI 分流" : "普通代理" }
+        var help: String { self == .ai ? "AI 网站经美国服务器；DNS、UDP 和 IPv6 统一经服务器，其他 IPv4 网页直连。" : "浏览器等遵循系统代理的连接经服务器；DNS 和 UDP 沿用系统设置。" }
         var coreMode: String { self == .ai ? "ai" : "all" }
-        static func restoring(_ stored: String?) -> Self { stored == "global" ? .all : Self(rawValue: stored ?? "") ?? .ai }
+        static func restoring(_ stored: String?) -> Self { stored == "global" ? .ai : Self(rawValue: stored ?? "") ?? .ai }
     }
     @Published private(set) var routingMode = RoutingMode.restoring(UserDefaults.standard.string(forKey: "routingMode"))
-    var routingCaption: String { routingMode == .ai ? "AI 与 DNS 分流 · 美国" : "全部代理 · 美国" }
+    var routingCaption: String { routingMode == .ai ? "AI 防泄漏 · 美国" : "普通代理 · 美国" }
     @Published private(set) var fallbackNotice: String?
-    @Published private(set) var compatibilityProxy = false
-    var usesPacketTunnel: Bool { !compatibilityProxy }
-    var protectionNote: String { packetTunnelActive ? (routingMode == .ai ? "AI / DNS 已分流 · UDP 出口已保护" : "DNS / UDP 已接管") : "临时系统代理 · DNS / UDP 未保护" }
+    var usesPacketTunnel: Bool { routingMode == .ai }
+    var protectionNote: String { packetTunnelActive ? "AI 防泄漏 · DNS / UDP 已接管" : "普通代理 · DNS / UDP 沿用系统设置" }
     @Published var needsTunnelApproval = false
     @Published private(set) var packetTunnelActive = false
     @Published private(set) var systemProxyActive = false
     private let proxyInspector: (Int) -> Bool
     private var proxyOwnershipTask: Task<Void, Never>?
-    var proxyOwnershipNote: String? { connected && compatibilityProxy && !systemProxyActive ? "服务器通道已连接；其他 VPN 或代理仍在接管系统流量。" : nil }
+    var proxyOwnershipNote: String? { connected && !usesPacketTunnel && !systemProxyActive ? "服务器通道已连接；其他 VPN 或代理仍在接管系统流量。" : nil }
     @Published var showTunnelDiagnostic = false
     @Published private(set) var diagnosticRunning = false
     @Published private(set) var diagnosticStage = "idle"
@@ -66,7 +65,7 @@ import Combine
         diagnosticMessage = "检测已取消"; diagnosticStage = "cancelled"
     }
     private let preparePacketTunnel: () throws -> Bool
-    private func prepareGlobalTunnel() -> Bool {
+    private func prepareAITunnel() -> Bool {
         guard usesPacketTunnel else { return true }
         do {
             guard try preparePacketTunnel() else { needsTunnelApproval = true; return false }
@@ -76,17 +75,17 @@ import Combine
     func finishTunnelInstallation() {
         needsTunnelApproval = false
         if diagnosticPending { diagnosticPending = false; startTunnelDiagnostic() }
-        else if connected { setRoutingMode(routingMode, force: true) } else { connect() }
+        else {
+            if connected { setRoutingMode(.ai, force: true) } else { routingMode = .ai; UserDefaults.standard.set("ai", forKey: "routingMode"); connect() }
+        }
     }
 
     func setRoutingMode(_ mode: RoutingMode, force: Bool = false) {
         guard (mode != routingMode || force), !busy, !loadingProfiles, !diagnosticRunning else { return }
         let previous = routingMode
-        let previousCompatibility = compatibilityProxy
         fallbackNotice = nil
-        compatibilityProxy = false
         routingMode = mode; UserDefaults.standard.set(mode.rawValue, forKey: "routingMode")
-        if connected && !prepareGlobalTunnel() { routingMode = previous; compatibilityProxy = previousCompatibility; UserDefaults.standard.set(previous.rawValue, forKey: "routingMode"); return }
+        if connected && !prepareAITunnel() { routingMode = previous; UserDefaults.standard.set(previous.rawValue, forKey: "routingMode"); return }
         guard connected, let profile = selected else { return }
         // Retire callbacks from the old session before restoring its proxy.
         // If restoration fails, retain both the live tunnel and its old scope.
@@ -99,7 +98,7 @@ import Combine
             let restored = await clean()
             guard session == token, wantsConnection else { return }
             guard restored else {
-                routingMode = previous; compatibilityProxy = previousCompatibility; UserDefaults.standard.set(previous.rawValue, forKey: "routingMode")
+                routingMode = previous; UserDefaults.standard.set(previous.rawValue, forKey: "routingMode")
                 finishProgress(); statusNote = message; state = .connected
                 return
             }
@@ -108,16 +107,15 @@ import Combine
                 let report = await preflightInspector(profile, nil, shadowrocket)
                 guard session == token, wantsConnection else { return }
                 if report.requiresAcknowledgement {
-                    routingMode = previous; UserDefaults.standard.set(previous.rawValue, forKey: "routingMode")
-                    compatibilityProxy = true
-                    fallbackNotice = "其他 VPN 或代理仍在接管网络，已恢复临时系统代理；DNS / UDP 未保护。"
+                    routingMode = .all; UserDefaults.standard.set("all", forKey: "routingMode")
+                    fallbackNotice = "其他 VPN 或代理仍在接管网络，已恢复普通代理；AI 防泄漏保护未启用。"
                     begin(profile); return
                 }
             }
             begin(profile)
         }
     }
-    static let defaultDomains = (try? String(contentsOf: Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/ai-domains.txt"), encoding: .utf8)) ?? "claude.ai\nclaude.com\nanthropic.com\nclaudeusercontent.com\nclaudemcpcontent.com\nchatgpt.com\nopenai.com\noaistatic.com\noaiusercontent.com\noaistatsig.com\ncdn.openaimerge.com\nchallenges.cloudflare.com\ncdn.workos.com\nforwarder.workos.com\nfrontend-apps-multi-region.workos.com\nimages.workoscdn.com\nsetup.workos.com\nworkos.imgix.net"
+    static let defaultDomains = (try? String(contentsOf: Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/ai-domains.txt"), encoding: .utf8)) ?? "claude.ai\nclaude.com\nanthropic.com\nclaudeusercontent.com\nclaudemcpcontent.com\nchatgpt.com\nopenai.com\noaistatic.com\noaiusercontent.com\noaistatsig.com\ncdn.openaimerge.com\nchallenges.cloudflare.com\ncdn.workos.com\nforwarder.workos.com\nfrontend-apps-multi-region.workos.com\nimages.workoscdn.com\nsetup.workos.com\nworkos.imgix.net\nwww.cloudflare.com\none.one.one.one\ncloudflare-dns.com\ndns.google\ndns.quad9.net\ndoh.opendns.com\ndns.alidns.com\ndoh.pub"
     private let reconnect = true
     @Published var state: State = .idle
     @Published var message = ""
@@ -376,7 +374,7 @@ import Combine
         self.profileValidator = validateProfile ?? { profile in _ = try await CoreRPC.call("validate", ["profile": CoreRPC.dictionary(profile)]) }
         self.configurationLoader = configurationLoader; self.coreExecutable = coreExecutable; self.agentExecutable = agentExecutable
         self.recoveryFile = recoveryFile; self.reconnectPause = reconnectPause; self.connectionCheckPause = connectionCheckPause
-        if UserDefaults.standard.string(forKey: "routingMode") == "claude" { UserDefaults.standard.set("ai", forKey: "routingMode") }
+        if ["claude", "global"].contains(UserDefaults.standard.string(forKey: "routingMode") ?? "") { UserDefaults.standard.set("ai", forKey: "routingMode") }
         reloadProfiles()
         statusObserver = objectWillChange.sink { [weak self] _ in
             guard let self, !self.statusUpdatePending else { return }
@@ -455,7 +453,7 @@ import Combine
     func toggle() { if connected || busy { disconnect() } else if storageError { reloadProfiles(interactionAllowed: true) } else if profiles.isEmpty { showImport = true } else { connect() } }
     func connect() {
         guard !connected, !busy, !diagnosticRunning, let profile = selected else { return }
-        fallbackNotice = nil; compatibilityProxy = false
+        fallbackNotice = nil
         let id = UUID(); preflightID = id; checkingPreflight = true; showNetworkCheck = false
         let shadowrocket = NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.liguangming.Shadowrocket" }
         preflightTask = Task {
@@ -468,13 +466,13 @@ import Combine
     }
     func continueAfterNetworkCheck() {
         guard !checkingPreflight, !connected, !busy else { return }
-        guard networkPreflight?.requiresAcknowledgement != true else { return }
+        guard !usesPacketTunnel || networkPreflight?.requiresAcknowledgement != true else { return }
         showNetworkCheck = false; startConnection()
     }
     func cancelNetworkCheck() { showNetworkCheck = false; networkPreflight = nil }
     private func startConnection() {
         guard let profile = selected else { return }
-        guard prepareGlobalTunnel() else { return }
+        guard prepareAITunnel() else { return }
         wantsConnection = true; backoff.reset(); waitingForNetwork = false
         session = UUID(); let token = session
         startProgress(.connect, phase: core != nil || recoveryNeeded ? .restoring : .server)
@@ -580,12 +578,12 @@ import Combine
         networkPreflight = nil
         message = packetTunnelActive ? protectionNote : "浏览器与遵循系统代理的应用已接入"; connectTimeout?.cancel()
         proxyOwnershipTask?.cancel()
-        systemProxyActive = compatibilityProxy && httpPort.map(proxyInspector) == true
+        systemProxyActive = !usesPacketTunnel && httpPort.map(proxyInspector) == true
         proxyOwnershipTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard !Task.isCancelled, let self, self.connected else { return }
-                let active = self.compatibilityProxy && self.httpPort.map(self.proxyInspector) == true
+                let active = !self.usesPacketTunnel && self.httpPort.map(self.proxyInspector) == true
                 if self.systemProxyActive != active { self.systemProxyActive = active }
             }
         }
@@ -685,8 +683,8 @@ import Combine
             let restored = await clean()
             guard session == token else { return }
             if restored, fallback, let profile = selected {
-                compatibilityProxy = true
-                fallbackNotice = "隧道验证未通过：\(text)。已恢复临时系统代理；DNS / UDP 未保护。"
+                routingMode = .all; UserDefaults.standard.set("all", forKey: "routingMode")
+                fallbackNotice = "AI 防泄漏验证未通过：\(text)。已切换普通代理，AI 保护未启用。"
                 wantsConnection = true; backoff.reset(); begin(profile); return
             }
             finishProgress(); state = .failed; retryUntil = nil
@@ -779,6 +777,6 @@ import Combine
         let code: String
         if checkingPreflight { code = "checking_network" }
         else { switch state { case .idle: code = "idle"; case .connecting: code = "connecting"; case .connected: code = "connected"; case .reconnecting: code = "reconnecting"; case .disconnecting: code = "disconnecting"; case .failed: code = "failed" } }
-        assistantStatus.updateConnection(.init(loaded: !loadingProfiles && !storageError, profileCount: profiles.count, state: code, routingMode: routingMode.rawValue, phase: connectionProgress?.phase.rawValue, connected: connected, busy: busy, storageLocked: storageError, exitVerified: connected && exitVerification != nil, exitCountry: connected ? safeCountry : nil, networkConflict: networkPreflight?.requiresAcknowledgement == true || (connected && compatibilityProxy && !systemProxyActive), errorCode: error, packetTunnelActive: packetTunnelActive, dnsProtected: connected && packetTunnelActive, udpProtected: connected && packetTunnelActive, systemProxyActive: connected && systemProxyActive, diagnosticStage: diagnosticStage, diagnosticPassed: diagnosticPassed))
+        assistantStatus.updateConnection(.init(loaded: !loadingProfiles && !storageError, profileCount: profiles.count, state: code, routingMode: routingMode.rawValue, phase: connectionProgress?.phase.rawValue, connected: connected, busy: busy, storageLocked: storageError, exitVerified: connected && exitVerification != nil, exitCountry: connected ? safeCountry : nil, networkConflict: networkPreflight?.requiresAcknowledgement == true || (connected && !usesPacketTunnel && !systemProxyActive), errorCode: error, packetTunnelActive: packetTunnelActive, dnsProtected: connected && packetTunnelActive, udpProtected: connected && packetTunnelActive, systemProxyActive: connected && systemProxyActive, diagnosticStage: diagnosticStage, diagnosticPassed: diagnosticPassed))
     }
 }
