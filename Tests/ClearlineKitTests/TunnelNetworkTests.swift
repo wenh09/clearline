@@ -41,6 +41,40 @@ final class TunnelNetworkTests: XCTestCase {
         }
     }
     private func journal() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent("Clearline-network-test-" + UUID().uuidString) }
+    func testAISplitOnlyInstallsSyntheticRoutesAndSupplementalDNS() throws {
+        let path = journal(); defer { try? FileManager.default.removeItem(at: path) }
+        let fake = FakeNetwork()
+        let original = fake.dns
+        let manager = TunnelNetwork(journalURL: path, command: fake.command)
+        var registered: [String] = []
+        var resolverCurrent = true
+        manager.configureSplitDNS = { domains in
+            registered = domains
+            return ({ resolverCurrent }, { registered = [] })
+        }
+        try manager.installSplit(interface: "utun42", endpoint: "198.51.100.1", uid: 501, clientPID: 42, domains: ["claude.ai", "openai.com"])
+        XCTAssertEqual(registered, ["claude.ai", "openai.com"])
+        XCTAssertEqual(Set(fake.routes.keys), ["198.19.0.0/16", "fd7a:115c:a1e0:1::/112"])
+        XCTAssertEqual(fake.dns, original)
+        XCTAssertFalse(fake.mutations.contains { $0.contains("-setdnsservers") })
+        try manager.refresh()
+        resolverCurrent = false
+        XCTAssertThrowsError(try manager.refresh())
+        try manager.restore(owner: 501)
+        XCTAssertTrue(registered.isEmpty)
+        XCTAssertTrue(fake.routes.isEmpty)
+        XCTAssertEqual(fake.dns, original)
+    }
+    func testAISplitRollsBackSyntheticRoutesWhenResolverFails() throws {
+        let path = journal(); defer { try? FileManager.default.removeItem(at: path) }
+        let fake = FakeNetwork()
+        let manager = TunnelNetwork(journalURL: path, command: fake.command)
+        manager.configureSplitDNS = { _ in throw TunnelNetworkFailure("fixture failure") }
+        XCTAssertThrowsError(try manager.installSplit(interface: "utun42", endpoint: "198.51.100.1", uid: 501, clientPID: 42, domains: ["claude.ai"]))
+        XCTAssertTrue(fake.routes.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+        XCTAssertFalse(fake.mutations.contains { $0.contains("-setdnsservers") })
+    }
     func testScopedPhysicalBypassAllowsBoundTCPWithoutChangingUnboundTunnel() throws {
         let path = journal(); defer { try? FileManager.default.removeItem(at: path) }
         let fake = FakeNetwork(); let manager = TunnelNetwork(journalURL: path, command: fake.command)

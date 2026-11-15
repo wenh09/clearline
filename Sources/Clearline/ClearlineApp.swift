@@ -3,7 +3,25 @@ import SwiftUI
 import UniformTypeIdentifiers
 import ClearlineKit
 
+@MainActor
+private final class ClearlineAppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
+    static let mainWindowID = "main"
+    var openWindow: OpenWindowAction?
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        guard let openWindow else { return true }
+        Self.showMainWindow(using: openWindow)
+        return false
+    }
+
+    static func showMainWindow(using openWindow: OpenWindowAction) {
+        openWindow(id: mainWindowID)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
 @main struct ClearlineApp: App {
+    @NSApplicationDelegateAdaptor(ClearlineAppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
     init() {
         // A data-only command for provisioning one's own local app; it never
@@ -28,7 +46,7 @@ import ClearlineKit
         }
     }
     var body: some Scene {
-        WindowGroup("轻连", id: "main") {
+        Window("轻连", id: ClearlineAppDelegate.mainWindowID) {
             MainView().environmentObject(model).frame(width: 360, height: 660)
         }
         .windowResizability(.contentSize)
@@ -72,7 +90,7 @@ private struct MenuContents: View {
             .disabled(model.loadingProfiles || model.state == .disconnecting)
         Divider()
         Menu("代理范围") { RoutingModeMenu().environmentObject(model) }
-        Button("打开轻连") { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
+        Button("打开轻连") { ClearlineAppDelegate.showMainWindow(using: openWindow) }
         Divider()
         Button("退出轻连") { model.quit() }
     }
@@ -92,6 +110,8 @@ private struct RoutingModeMenu: View {
 
 struct MainView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var appDelegate: ClearlineAppDelegate
+    @Environment(\.openWindow) private var openWindow
     private let accent = Color(red: 0.09, green: 0.55, blue: 0.47)
 
     var body: some View {
@@ -138,9 +158,6 @@ struct MainView: View {
                 .padding(.top, 8)
             RoutingModeControl().environmentObject(model)
                 .padding(.top, 10)
-            if let note = model.fallbackNotice {
-                Text(note).font(.system(size: 11)).foregroundStyle(.orange).multilineTextAlignment(.center).padding(.horizontal, 20)
-            }
             if let note = model.proxyOwnershipNote {
                 Text(note).font(.system(size: 11)).foregroundStyle(.orange).multilineTextAlignment(.center).padding(.horizontal, 20)
             }
@@ -158,6 +175,7 @@ struct MainView: View {
         .padding(.bottom, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(NSColor.windowBackgroundColor))
+        .onAppear { appDelegate.openWindow = openWindow }
         .sheet(isPresented: $model.showImport) { ImportView().environmentObject(model) }
         .sheet(isPresented: $model.showTransfer) { TransferView(importing: model.transferImport).environmentObject(model) }
         .sheet(isPresented: $model.showCloudSetup, onDismiss: {
@@ -169,9 +187,9 @@ struct MainView: View {
         .sheet(isPresented: $model.needsTunnelApproval) {
             VStack(alignment: .leading, spacing: 16) {
                 Text("安装系统隧道组件").font(.title2.weight(.semibold))
-                Text("全局隧道需要创建虚拟网卡，接管公网 TCP、UDP 与系统 DNS。请打开网络组件安装包，在 macOS 安装器中确认管理员权限，再返回轻连。更新组件前请先断开全局隧道。")
+                Text("AI 分流需要虚拟网卡处理指定域名的 DNS 与连接。请打开网络组件安装包，在 macOS 安装器中确认管理员权限，再返回轻连。更新组件前请先断开轻连。")
                     .fixedSize(horizontal: false, vertical: true)
-                Text("连接凭据不会交给后台服务。断开时会恢复原 DNS 和路由；AI 分流仍可使用系统代理。")
+                Text("断开时会移除 AI 分流的 DNS 和路由。普通网站继续使用系统网络。")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 HStack {
                     Button("稍后") { model.needsTunnelApproval = false }

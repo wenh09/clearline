@@ -96,7 +96,10 @@ while true {
             guard cl_send_device(socket, device) == 0, message(socket)?["action"] as? String == "ready" else { throw TunnelNetworkFailure("虚拟网卡描述符交接失败") }
             stage = action == "probe" ? "configure_probe" : "network_install"
             if action == "probe" { try network.configureProbe(interface: String(cString: name)) }
-            else { try network.install(interface: String(cString: name), endpoint: endpoint, uid: uid, clientPID: pid) }
+            else if initial["domains"] != nil {
+                guard let domains = initial["domains"] as? [String] else { throw TunnelNetworkFailure("AI 分流域名无效") }
+                try network.installSplit(interface: String(cString: name), endpoint: endpoint, uid: uid, clientPID: pid, domains: domains)
+            } else { try network.install(interface: String(cString: name), endpoint: endpoint, uid: uid, clientPID: pid) }
             cl_timeout(socket, 0); event(socket, "applied")
             while let command = message(socket) { if command["action"] as? String == "disable" { break } }
             try network.restore(owner: uid); event(socket, "restored")

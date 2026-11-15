@@ -37,6 +37,48 @@ func effectiveDNSOwned(output string) bool {
 	return count > 0
 }
 
+func effectiveSplitDNS(output string, domains []string) bool {
+	resolvers, _, _ := strings.Cut(output, "DNS configuration (for scoped queries)")
+	matched := make(map[string]bool)
+	hasDefault := false
+	for index, block := range strings.Split(resolvers, "resolver #")[1:] {
+		var domain string
+		var servers []string
+		for _, line := range strings.Split(block, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 3 || fields[1] != ":" {
+				continue
+			}
+			if fields[0] == "domain" {
+				domain = strings.TrimSuffix(strings.ToLower(fields[2]), ".")
+			}
+			if strings.HasPrefix(fields[0], "nameserver[") {
+				servers = append(servers, fields[2])
+			}
+		}
+		protected := len(servers) == 1 && servers[0] == "198.18.0.2"
+		for _, server := range servers {
+			if server == "198.18.0.2" && (!protected || index == 0 || !matchesDomain(domain, domains)) {
+				return false
+			}
+		}
+		if matchesDomain(domain, domains) && len(servers) != 0 && !protected {
+			return false
+		}
+		if protected {
+			matched[domain] = true
+		} else if index == 0 && len(servers) != 0 {
+			hasDefault = true
+		}
+	}
+	for _, domain := range domains {
+		if !matched[domain] {
+			return false
+		}
+	}
+	return hasDefault && len(domains) != 0
+}
+
 func (directProbeTunnel) Close() {}
 func (directProbeTunnel) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, network, address)
@@ -155,6 +197,7 @@ func verifySplitPacketPath(parent context.Context, tunnel Tunnel, policy Routing
 	if len(policy.Domains) == 0 {
 		return errors.New("分流验证：AI 域名列表为空")
 	}
+	scoped := policy.Mode == "ai" || policy.Mode == "claude"
 	for _, network := range []string{"udp", "tcp"} {
 		ips, err := queryDNSPath(ctx, (directProbeTunnel{}).DialContext, "198.18.0.2", network, policy.Domains[0]+".")
 		if err != nil || len(ips) == 0 {
@@ -165,6 +208,9 @@ func verifySplitPacketPath(parent context.Context, tunnel Tunnel, policy Routing
 				return errors.New("分流验证：AI DNS 未受分流规则保护")
 			}
 		}
+		if scoped {
+			continue
+		}
 		ips, err = queryDNSPath(ctx, (directProbeTunnel{}).DialContext, "198.18.0.2", network, "example.com.")
 		if err != nil || len(ips) == 0 {
 			return errors.New("分流验证：普通域名的隧道 DNS 不可用")
@@ -174,6 +220,24 @@ func verifySplitPacketPath(parent context.Context, tunnel Tunnel, policy Routing
 				return errors.New("分流验证：普通 DNS 分流错误")
 			}
 		}
+	}
+	if scoped {
+		if err = checkScopedDNS(ctx, policy.Domains); err != nil {
+			return err
+		}
+		ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", policy.Domains[0]+".")
+		if err != nil || len(ips) == 0 {
+			return errors.New("分流验证：系统无法解析 AI 域名")
+		}
+		for _, ip := range ips {
+			if !fakeIPv4.Contains(ip.Unmap()) {
+				return errors.New("分流验证：系统 AI DNS 查询绕开了隧道")
+			}
+		}
+		if err = verifyUDPExit(ctx, (directProbeTunnel{}).DialContext, net.JoinHostPort(packetTraceAddress, "3478"), expected.IP); err != nil {
+			return errors.New("分流验证：AI UDP 出口不可用")
+		}
+		return nil
 	}
 	target, err := resolveSTUNThroughTunnel(ctx, tunnel)
 	if err != nil {

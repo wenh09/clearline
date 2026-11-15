@@ -22,11 +22,12 @@ private to that user. Never use a developer's personal server as a default.
    tools. Existing WireGuard clients require their own identity/configuration.
 5. Run the connection preflight. Resolve other VPN routes to the server
    endpoint, preserve working connectivity, then connect and verify the exit.
-   AI split mode requires the matching component and protects all system DNS,
-   public UDP and IPv6 through the server. Only ordinary IPv4 TCP goes direct.
+   AI split mode requires the matching component. Listed AI domains use a
+   supplemental DNS resolver and synthetic address routes through the server.
+   Ordinary domains retain the system resolver and physical IPv4/IPv6 routes.
    Ordinary proxy mode retains HTTP/HTTPS/SOCKS without DNS/UDP protection.
-   A failed AI check switches visibly to ordinary proxy, never claiming AI
-   protection there. The owner installs the component with macOS admin approval.
+   A failed AI check restores the network and reports the failure.
+   The owner installs the component with macOS admin approval.
    Do not bypass that confirmation or run the credential-handling core as root.
    Inspect packetTunnelActive/dnsProtected/udpProtected separately from exit IP.
 6. Only if the user separately chooses “新建服务器”, request create permission

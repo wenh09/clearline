@@ -66,8 +66,8 @@ func runSession(parent context.Context, r Request, input *bufio.Reader, output f
 		if e != nil {
 			return e
 		}
-		routing = &packetRouting{policy: policy, names: names}
-		if policy.Mode != "all" {
+		routing = &packetRouting{policy: policy, names: names, scoped: policy.Mode == "ai" || policy.Mode == "claude"}
+		if policy.Mode != "all" && !routing.scoped {
 			direct, e := capturePhysicalTunnel(parent)
 			if e != nil {
 				return e

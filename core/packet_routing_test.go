@@ -37,6 +37,29 @@ func splitQuestion(t *testing.T, host string, kind dnsmessage.Type) []byte {
 	}
 	return q
 }
+func TestScopedAIRejectsOrdinaryQueriesAndStaleSyntheticDestinations(t *testing.T) {
+	r, remote, direct := splitFixture(t)
+	r.scoped = true
+	ctx := context.Background()
+	if _, err := r.dns(ctx, remote, splitQuestion(t, "ordinary.example", dnsmessage.TypeAAAA)); err == nil {
+		t.Fatal("ordinary DNS must be handled by the system resolver")
+	}
+	stale, err := r.names.address("ordinary.example", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"[2001:db8::1]:443", "198.51.100.23:443", netip.AddrPortFrom(stale, 443).String()} {
+		if _, err = r.dial(ctx, remote, "udp", target); err == nil {
+			t.Fatalf("unexpected connection to %s", target)
+		}
+	}
+	if len(remote.calls) != 0 || len(direct.calls) != 0 {
+		t.Fatal("ordinary requests reached the packet tunnel")
+	}
+	if _, err = r.dns(ctx, remote, splitQuestion(t, "sub.ai.example", dnsmessage.TypeA)); err != nil {
+		t.Fatal(err)
+	}
+}
 func TestAIStrictDNSUDPAndIPv6ShareServerWhileOrdinaryTCPIsDirect(t *testing.T) {
 	r, remote, direct := splitFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -111,6 +134,40 @@ func TestAIStrictDNSNeverFallsBackToLocalForAnyDomain(t *testing.T) {
 	direct.fail = true
 	if _, err := r.dns(context.Background(), remote, splitQuestion(t, "ordinary.example", dnsmessage.TypeA)); err != nil {
 		t.Fatal("DNS depended on local resolver", err)
+	}
+}
+
+func TestQQMailPrefersIPv4OnlyWhenAvailable(t *testing.T) {
+	for _, tc := range []struct {
+		host string
+		noA  bool
+		want bool
+	}{
+		{"wx.mail.qq.com", false, false},
+		{"wx.mail.qq.com", true, true},
+		{"graph.qq.com", false, false},
+		{"open.weixin.qq.com", false, false},
+		{"open.weixin.qq.com", true, true},
+		{"graph.qq.com.example", false, true},
+		{"ordinary.example", false, true},
+		{"sub.ai.example", false, true},
+	} {
+		r, remote, direct := splitFixture(t)
+		remote.noA = tc.noA
+		reply, err := r.dns(context.Background(), remote, splitQuestion(t, tc.host, dnsmessage.TypeAAAA))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var response dnsmessage.Message
+		if err := response.Unpack(reply); err != nil {
+			t.Fatal(err)
+		}
+		if hasDNSAnswer(response, dnsmessage.TypeAAAA) != tc.want || response.Header.RCode != dnsmessage.RCodeSuccess {
+			t.Fatalf("unexpected AAAA response for %s (noA=%v)", tc.host, tc.noA)
+		}
+		if len(direct.calls) != 0 {
+			t.Fatal("DNS escaped the tunnel")
+		}
 	}
 }
 func TestProxyHostnameResolutionAlsoUsesTunnelDNS(t *testing.T) {

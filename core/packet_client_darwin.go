@@ -101,7 +101,11 @@ func openPacketSession(ctx context.Context, t Tunnel, endpoint, action string, r
 	c.SetDeadline(time.Now().Add(25 * time.Second))
 	stop := context.AfterFunc(ctx, func() { c.Close() })
 	defer stop()
-	if e = json.NewEncoder(c).Encode(map[string]any{"action": action, "endpoint": endpoint}); e != nil {
+	request := map[string]any{"action": action, "endpoint": endpoint}
+	if len(routing) != 0 && routing[0].scoped {
+		request["domains"] = routing[0].policy.Domains
+	}
+	if e = json.NewEncoder(c).Encode(request); e != nil {
 		return nil, e
 	}
 	data, control := make([]byte, 16384), make([]byte, unix.CmsgSpace(4))

@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import SystemConfiguration
 
 public struct TunnelNetworkFailure: LocalizedError {
     public let errorDescription: String?
@@ -29,6 +30,9 @@ public final class TunnelNetwork {
     private let run: ([String]) throws -> String
     private let lock = NSRecursiveLock()
     private var active: Journal?
+    typealias SplitDNS = (isCurrent: () -> Bool, remove: () -> Void)
+    private var splitDNS: SplitDNS?
+    var configureSplitDNS: ([String]) throws -> SplitDNS = TunnelNetwork.addSplitDNS
     public init(journalURL: URL = URL(fileURLWithPath: TunnelNetwork.journalPath), command: (([String]) throws -> String)? = nil) {
         self.journalURL = journalURL; run = command ?? Self.command
     }
@@ -103,6 +107,48 @@ public final class TunnelNetwork {
         return values
     }
     private func flush() { _ = try? run(["/usr/bin/dscacheutil", "-flushcache"]); _ = try? run(["/usr/bin/killall", "-HUP", "mDNSResponder"]) }
+    private static func addSplitDNS(_ domains: [String]) throws -> SplitDNS {
+        let key = "State:/Network/Service/\(UUID().uuidString)/DNS" as CFString
+        let config: [String: Any] = [
+            kSCPropNetDNSServerAddresses as String: [dnsAddress],
+            kSCPropNetDNSSupplementalMatchDomains as String: domains,
+            "SupplementalMatchDomainsNoSearch": 1
+        ]
+        guard let store = SCDynamicStoreCreate(nil, "Clearline split DNS" as CFString, nil, nil),
+              SCDynamicStoreAddTemporaryValue(store, key, config as CFDictionary) else {
+            throw TunnelNetworkFailure("无法配置 AI 域名 DNS")
+        }
+        return ({
+            guard let value = SCDynamicStoreCopyValue(store, key) else { return false }
+            return CFEqual(value, config as CFDictionary)
+        }, {
+            if let value = SCDynamicStoreCopyValue(store, key), CFEqual(value, config as CFDictionary) {
+                _ = SCDynamicStoreRemoveValue(store, key)
+            }
+        })
+    }
+    public func installSplit(interface: String, endpoint: String, uid: UInt32, clientPID: Int32, domains: [String]) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard interface.range(of: "^utun[0-9]+$", options: .regularExpression) != nil, Self.validIPv4(endpoint),
+              !domains.isEmpty, domains.allSatisfy({ domain in
+                  domain.utf8.count <= 253 && domain.range(of: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$", options: .regularExpression) != nil
+              }) else { throw TunnelNetworkFailure("AI 分流参数无效") }
+        guard !FileManager.default.fileExists(atPath: journalURL.path) else { throw TunnelNetworkFailure("请先恢复上一次系统隧道的网络设置") }
+        try verifyEntry(endpoint)
+        var journal = Journal(uid: uid, interface: interface, endpoint: endpoint, clientPID: clientPID)
+        try store(journal)
+        do {
+            _ = try run(["/sbin/ifconfig", interface, "inet", "198.18.0.1", Self.dnsAddress, "mtu", "1280", "up"])
+            _ = try run(["/sbin/ifconfig", interface, "inet6", "fd7a:115c:a1e0::1", "prefixlen", "126", "alias"])
+            for (family, prefix) in [("-inet", "198.19.0.0/16"), ("-inet6", "fd7a:115c:a1e0:1::/112")] {
+                journal.routes.append(prefix); try store(journal)
+                _ = try run(["/sbin/route", "-n", "add", family, prefix, "-interface", interface])
+            }
+            try verifyEntry(endpoint)
+            splitDNS = try configureSplitDNS(domains)
+            flush()
+        } catch { try? restore(); throw error }
+    }
     public func configureProbe(interface: String) throws {
         guard interface.range(of: "^utun[0-9]+$", options: .regularExpression) != nil else { throw TunnelNetworkFailure("诊断网卡名称无效") }
         // Only this temporary device receives an address. Closing both owned
@@ -187,6 +233,11 @@ public final class TunnelNetwork {
     public func refresh() throws {
         lock.lock(); defer { lock.unlock() }
         guard var journal = active else { return }
+        if let splitDNS {
+            guard splitDNS.isCurrent() else { throw TunnelNetworkFailure("AI 域名 DNS 已失效，请重新连接") }
+            try verifyEntry(journal.endpoint)
+            return
+        }
         for snapshot in journal.dns {
             guard try dns(snapshot.service) == [Self.dnsAddress] else { throw TunnelNetworkFailure("DNS 设置已被其他软件修改，请重新连接") }
         }
@@ -232,7 +283,9 @@ public final class TunnelNetwork {
         }
         let journal = try PropertyListDecoder().decode(Journal.self, from: Data(contentsOf: journalURL))
         if let owner, owner != journal.uid { throw TunnelNetworkFailure("另一位用户的隧道正在恢复") }
-        let existing = try services()
+        splitDNS?.remove()
+        splitDNS = nil
+        let existing = journal.dns.isEmpty ? [] : try services()
         for snapshot in journal.dns where existing.contains(snapshot.service) {
             if try dns(snapshot.service) == [Self.dnsAddress] { _ = try run(["/usr/sbin/networksetup", "-setdnsservers", snapshot.service] + (snapshot.before.isEmpty ? ["Empty"] : snapshot.before)) }
         }

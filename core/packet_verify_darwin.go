@@ -13,3 +13,11 @@ func checkEffectiveDNS(ctx context.Context) error {
 	}
 	return nil
 }
+
+func checkScopedDNS(ctx context.Context, domains []string) error {
+	output, err := exec.CommandContext(ctx, "/usr/sbin/scutil", "--dns").Output()
+	if err != nil || !effectiveSplitDNS(string(output), domains) {
+		return errors.New("分流验证：AI 域名 DNS 或普通域名的默认 DNS 未生效")
+	}
+	return nil
+}

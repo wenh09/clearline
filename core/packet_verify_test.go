@@ -34,6 +34,26 @@ func TestEffectiveDNSRejectsRemainingISPOrScopedResolvers(t *testing.T) {
 		}
 	}
 }
+func TestEffectiveSplitDNSRequiresOriginalDefaultAndEveryProtectedDomain(t *testing.T) {
+	defaultDNS := "resolver #1\n nameserver[0] : 192.0.2.53\n"
+	claude := "resolver #2\n domain : claude.ai\n nameserver[0] : 198.18.0.2\n"
+	codex := "resolver #3\n domain : openai.com\n nameserver[0] : 198.18.0.2\n"
+	domains := []string{"claude.ai", "openai.com"}
+	if !effectiveSplitDNS(defaultDNS+claude+codex, domains) {
+		t.Fatal("split DNS rejected")
+	}
+	for _, output := range []string{
+		claude + codex,
+		defaultDNS + claude,
+		defaultDNS + claude + codex + "resolver #4\n domain : unrelated.example\n nameserver[0] : 198.18.0.2\n",
+		defaultDNS + claude + codex + "resolver #4\n domain : api.openai.com\n nameserver[0] : 192.0.2.53\n",
+		defaultDNS + " nameserver[1] : 198.18.0.2\n" + claude + codex,
+	} {
+		if effectiveSplitDNS(output, domains) {
+			t.Fatal("unsafe resolver layout accepted", output)
+		}
+	}
+}
 
 func TestSTUNRejectsSpoofedTruncatedAndMismatchedResponses(t *testing.T) {
 	request := make([]byte, 20)

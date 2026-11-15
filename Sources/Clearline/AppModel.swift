@@ -11,15 +11,14 @@ import Combine
         case ai, all
         var id: String { rawValue }
         var title: String { self == .ai ? "AI 分流" : "普通代理" }
-        var help: String { self == .ai ? "AI 网站经美国服务器；DNS、UDP 和 IPv6 统一经服务器，其他 IPv4 网页直连。" : "浏览器等遵循系统代理的连接经服务器；DNS 和 UDP 沿用系统设置。" }
+        var help: String { self == .ai ? "Claude、Codex 和所需登录域名经美国服务器；其他网站沿用系统 DNS 和网络。" : "浏览器等遵循系统代理的连接经服务器；DNS 和 UDP 沿用系统设置。" }
         var coreMode: String { self == .ai ? "ai" : "all" }
         static func restoring(_ stored: String?) -> Self { stored == "global" ? .ai : Self(rawValue: stored ?? "") ?? .ai }
     }
     @Published private(set) var routingMode = RoutingMode.restoring(UserDefaults.standard.string(forKey: "routingMode"))
-    var routingCaption: String { routingMode == .ai ? "AI 防泄漏 · 美国" : "普通代理 · 美国" }
-    @Published private(set) var fallbackNotice: String?
+    var routingCaption: String { routingMode == .ai ? "AI 分流 · 美国" : "普通代理 · 美国" }
     var usesPacketTunnel: Bool { routingMode == .ai }
-    var protectionNote: String { packetTunnelActive ? "AI 防泄漏 · DNS / UDP 已接管" : "普通代理 · DNS / UDP 沿用系统设置" }
+    var protectionNote: String { packetTunnelActive ? "AI 分流 · 指定域名 DNS / UDP 已保护" : "普通代理 · DNS / UDP 沿用系统设置" }
     @Published var needsTunnelApproval = false
     @Published private(set) var packetTunnelActive = false
     @Published private(set) var systemProxyActive = false
@@ -83,7 +82,6 @@ import Combine
     func setRoutingMode(_ mode: RoutingMode, force: Bool = false) {
         guard (mode != routingMode || force), !busy, !loadingProfiles, !diagnosticRunning else { return }
         let previous = routingMode
-        fallbackNotice = nil
         routingMode = mode; UserDefaults.standard.set(mode.rawValue, forKey: "routingMode")
         if connected && !prepareAITunnel() { routingMode = previous; UserDefaults.standard.set(previous.rawValue, forKey: "routingMode"); return }
         guard connected, let profile = selected else { return }
@@ -107,15 +105,13 @@ import Combine
                 let report = await preflightInspector(profile, nil, shadowrocket)
                 guard session == token, wantsConnection else { return }
                 if report.requiresAcknowledgement {
-                    routingMode = .all; UserDefaults.standard.set("all", forKey: "routingMode")
-                    fallbackNotice = "其他 VPN 或代理仍在接管网络，已恢复普通代理；AI 防泄漏保护未启用。"
-                    begin(profile); return
+                    fail("其他 VPN 或代理仍在接管网络，AI 分流未启用。"); return
                 }
             }
             begin(profile)
         }
     }
-    static let defaultDomains = (try? String(contentsOf: Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/ai-domains.txt"), encoding: .utf8)) ?? "claude.ai\nclaude.com\nanthropic.com\nclaudeusercontent.com\nclaudemcpcontent.com\nchatgpt.com\nopenai.com\noaistatic.com\noaiusercontent.com\noaistatsig.com\ncdn.openaimerge.com\nchallenges.cloudflare.com\ncdn.workos.com\nforwarder.workos.com\nfrontend-apps-multi-region.workos.com\nimages.workoscdn.com\nsetup.workos.com\nworkos.imgix.net\nwww.cloudflare.com\none.one.one.one\ncloudflare-dns.com\ndns.google\ndns.quad9.net\ndoh.opendns.com\ndns.alidns.com\ndoh.pub"
+    static let defaultDomains = (try? String(contentsOf: Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/ai-domains.txt"), encoding: .utf8)) ?? "claude.ai\nclaude.com\nanthropic.com\nclaudeusercontent.com\nclaudemcpcontent.com\nchatgpt.com\nopenai.com\noaistatic.com\noaiusercontent.com\noaistatsig.com\ncdn.openaimerge.com\nchallenges.cloudflare.com\ncdn.workos.com\nforwarder.workos.com\nfrontend-apps-multi-region.workos.com\nimages.workoscdn.com\nsetup.workos.com\nworkos.imgix.net"
     private let reconnect = true
     @Published var state: State = .idle
     @Published var message = ""
@@ -456,7 +452,6 @@ import Combine
     func toggle() { if connected || busy { disconnect() } else if storageError { reloadProfiles(interactionAllowed: true) } else if profiles.isEmpty { showImport = true } else { connect() } }
     func connect() {
         guard !connected, !busy, !diagnosticRunning, let profile = selected else { return }
-        fallbackNotice = nil
         let id = UUID(); preflightID = id; checkingPreflight = true; showNetworkCheck = false
         let shadowrocket = NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.liguangming.Shadowrocket" }
         preflightTask = Task {
@@ -677,7 +672,6 @@ import Combine
         }
     }
     private func fail(_ text: String) {
-        let fallback = usesPacketTunnel && wantsConnection
         wantsConnection = false; waitingForNetwork = false; networkCheckTask?.cancel(); retryTask?.cancel(); connectTimeout?.cancel(); session = UUID()
         let token = session
         state = .disconnecting
@@ -685,11 +679,6 @@ import Combine
         Task {
             let restored = await clean()
             guard session == token else { return }
-            if restored, fallback, let profile = selected {
-                routingMode = .all; UserDefaults.standard.set("all", forKey: "routingMode")
-                fallbackNotice = "AI 防泄漏验证未通过：\(text)。已切换普通代理，AI 保护未启用。"
-                wantsConnection = true; backoff.reset(); begin(profile); return
-            }
             finishProgress(); state = .failed; retryUntil = nil
             if restored { message = text }; statusNote = message; log(message)
         }

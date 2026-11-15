@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -130,6 +131,7 @@ type packetRouting struct {
 	policy RoutingPolicy
 	direct Tunnel
 	names  *fakeIPCache
+	scoped bool
 }
 
 func (r *packetRouting) dial(ctx context.Context, tunnel Tunnel, network, address string) (net.Conn, error) {
@@ -142,6 +144,9 @@ func (r *packetRouting) dial(ctx context.Context, tunnel Tunnel, network, addres
 		return nil, err
 	}
 	if host == packetTraceAddress {
+		if r.scoped && network == "udp" && port == "3478" {
+			return tunnel.DialContext(ctx, network, "stun.cloudflare.com:3478")
+		}
 		return tunnel.DialContext(ctx, network, net.JoinHostPort("1.1.1.1", port))
 	}
 	if r.names != nil {
@@ -149,11 +154,17 @@ func (r *packetRouting) dial(ctx context.Context, tunnel Tunnel, network, addres
 			if name == "" {
 				return nil, errors.New("分流 DNS 缓存已变化，请重新解析域名")
 			}
+			if r.scoped && r.policy.Route(name) != "tunnel" {
+				return nil, errors.New("缓存域名已移出 AI 分流，请重新解析")
+			}
 			return tunnel.DialContext(ctx, network, net.JoinHostPort(name, port))
 		}
 	}
 	if r.policy.Mode == "all" {
 		return tunnel.DialContext(ctx, network, address)
+	}
+	if r.scoped {
+		return nil, errors.New("目标不属于 AI 分流")
 	}
 	if r.direct == nil {
 		return nil, errors.New("本地直连入口不可用")
@@ -172,6 +183,9 @@ func (r *packetRouting) dns(ctx context.Context, tunnel Tunnel, query []byte) ([
 	}
 	question := message.Questions[0]
 	ai := r.policy.Route(question.Name.String()) == "tunnel"
+	if r.scoped && !ai {
+		return nil, errors.New("DNS 查询不属于 AI 分流")
+	}
 	reply, err := dnsThroughTunnel(ctx, tunnel, query)
 	if err != nil {
 		return nil, err
@@ -182,6 +196,24 @@ func (r *packetRouting) dns(ctx context.Context, tunnel Tunnel, query []byte) ([
 	var response dnsmessage.Message
 	if response.Unpack(reply) != nil {
 		return nil, errors.New("DNS 响应无效")
+	}
+	// QQ Mail and its login frames can close the tunneled IPv6 connection
+	// during TLS, after the browser has committed to that address.
+	if !ai && question.Type == dnsmessage.TypeAAAA && question.Class == dnsmessage.ClassINET &&
+		preferIPv4ForMailLogin(question.Name) &&
+		response.Header.RCode == dnsmessage.RCodeSuccess && hasDNSAnswer(response, dnsmessage.TypeAAAA) {
+		message.Questions[0].Type = dnsmessage.TypeA
+		if ipv4Query, e := message.Pack(); e == nil {
+			check, cancel := context.WithTimeout(ctx, time.Second)
+			ipv4Reply, e := dnsThroughTunnel(check, tunnel, ipv4Query)
+			cancel()
+			var ipv4 dnsmessage.Message
+			if e == nil && ipv4.Unpack(ipv4Reply) == nil && ipv4.Header.RCode == dnsmessage.RCodeSuccess && hasDNSAnswer(ipv4, dnsmessage.TypeA) {
+				response.Answers, response.Authorities, response.Additionals = nil, nil, nil
+				response.Header.AuthenticData = false
+				return response.Pack()
+			}
+		}
 	}
 	if ai {
 		if question.Type == 64 || question.Type == 65 {
@@ -215,6 +247,24 @@ func (r *packetRouting) dns(ctx context.Context, tunnel Tunnel, query []byte) ([
 		return response.Pack()
 	}
 	return reply, nil
+}
+
+func preferIPv4ForMailLogin(name dnsmessage.Name) bool {
+	switch strings.ToLower(name.String()) {
+	case "wx.mail.qq.com.", "graph.qq.com.", "open.weixin.qq.com.":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasDNSAnswer(message dnsmessage.Message, kind dnsmessage.Type) bool {
+	for _, answer := range message.Answers {
+		if answer.Header.Type == kind && answer.Header.Class == dnsmessage.ClassINET {
+			return true
+		}
+	}
+	return false
 }
 
 // Keep common literal encrypted-DNS endpoints inside the AI tunnel as well.

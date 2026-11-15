@@ -22,6 +22,7 @@ type packetTestTunnel struct {
 	calls []string
 	fail  bool
 	large bool
+	noA   bool
 }
 
 func (t *packetTestTunnel) Close() {}
@@ -71,7 +72,7 @@ func (t *packetTestTunnel) DialContext(ctx context.Context, network, address str
 				count = 100
 			}
 			for i := 0; i < count; i++ {
-				if q.Type == dnsmessage.TypeA {
+				if q.Type == dnsmessage.TypeA && !t.noA {
 					builder.AResource(dnsmessage.ResourceHeader{Name: q.Name, Class: dnsmessage.ClassINET, TTL: 30}, dnsmessage.AResource{A: [4]byte{198, 51, 100, 23}})
 				} else if q.Type == dnsmessage.TypeAAAA {
 					builder.AAAAResource(dnsmessage.ResourceHeader{Name: q.Name, Class: dnsmessage.ClassINET, TTL: 30}, dnsmessage.AAAAResource{AAAA: netip.MustParseAddr("2001:db8::23").As16()})

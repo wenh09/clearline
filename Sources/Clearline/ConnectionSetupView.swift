@@ -185,7 +185,7 @@ import SwiftUI
         VStack(alignment: .leading, spacing: 16) {
             Text(app.networkPreflight?.title ?? "连接前检查").font(.title2.weight(.semibold))
             if let report = app.networkPreflight {
-                Text(app.usesPacketTunnel ? "AI 防泄漏需要接管 DNS、UDP 和 IPv6。请先停用其他系统代理或 VPN，再重新检查。" : report.explanation).fixedSize(horizontal: false, vertical: true)
+                Text(app.usesPacketTunnel ? "其他系统代理或 VPN 可能覆盖 AI 分流。请先停用，再重新检查。" : report.explanation).fixedSize(horizontal: false, vertical: true)
                 if report.serverUsesVPNRoute, let address = report.bypassAddress {
                     Text("服务器入口：" + address).font(.callout).textSelection(.enabled)
                     Button("复制入口直连地址") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(address, forType: .string) }
